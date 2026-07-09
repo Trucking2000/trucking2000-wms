@@ -179,8 +179,6 @@ const INIT_USERS=[
    permissions:{dashboard:"view",inbound:"addedit",outbound:"addedit",history:"view",inventory:"view",activity:"view"},allowedWarehouses:[]},
   {id:"U002",username:"sara",password:"sara123",name:"Sara Kim",role:"staff",active:true,
    permissions:{dashboard:"view",inbound:"add",outbound:"add",history:"view",inventory:"view",activity:"view"},allowedWarehouses:[]},
-  {id:"U003",username:"freight",password:"freight123",name:"Freight Desk",role:"freight",active:true,
-   permissions:{dashboard:"view",outbound:"addedit",history:"view"},allowedWarehouses:[]},
   // Warehouse user: can only see their own location
   {id:"U004",username:"wh-rahway",password:"wh123",name:"Rahway Warehouse",role:"warehouse",active:true,
    permissions:{inbound:"addedit",outbound:"addedit",inventory:"view"},allowedWarehouses:["T2-NJY-51RA"]},
@@ -456,7 +454,7 @@ function Inbound({orders,setOrders,customers,warehouses,isAdmin,perm="full",logA
             <div style={{fontSize:12,color:C.muted,marginTop:2}}>{showReceived?"Received only":"Submitted & Scheduled"}</div>
           </div>
           <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
-            {isAdmin&&<label style={{display:"flex",alignItems:"center",gap:5,fontSize:12,color:showReceived?C.amber:C.muted,cursor:"pointer"}}><input type="checkbox" checked={showReceived} onChange={e=>setShowReceived(e.target.checked)}/>Show Received</label>}
+            {mayFull&&<label style={{display:"flex",alignItems:"center",gap:5,fontSize:12,color:showReceived?C.amber:C.muted,cursor:"pointer"}}><input type="checkbox" checked={showReceived} onChange={e=>setShowReceived(e.target.checked)}/>Show Received</label>}
             <select value={filterWh} onChange={e=>setFilterWh(e.target.value)} style={{...s.input,width:160}}><option value="">All Warehouses</option>{warehouses.map(w=><option key={w.id} value={w.code}>{w.code}</option>)}</select>
             <select value={filterCust} onChange={e=>setFilterCust(e.target.value)} style={{...s.input,width:150}}><option value="">All Customers</option>{customers.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select>
             <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="SKU / Container / PO# / Ref" style={{...s.input,width:200}}/>
@@ -665,12 +663,13 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
   const[freightModal,setFreightModal]=useState(null); // order awaiting freight confirm
   const[freightFee,setFreightFee]=useState("");
   const[selPrint,setSelPrint]=useState({}); // orderId -> true, for picking tickets
-  const isFreight=role==="freight"||isAdmin;
+  // Freight cost may be entered by anyone with Full Access to Outbound (admin included).
+  const isFreight=mayFull;
   const empty={type:"OUT",submitted:today.toISOString().split("T")[0],eta:"",etd:"",customerId:"",project:"",warehouseCode:"",containerNo:"",cntrSize:"",loadingType:"",sku:"",description:"",plts:"",units:"",reference:"",ttsPo:"",notes:"",status:"Submitted",shipMode:"FTL",carrierId:"",mktShipFee:"",serviceLines:[],docCount:0,confirmedDate:"",receivedDate:"",shippedDate:"",ledgerId:""};
   const[form,setForm]=useState(empty);
   const[showShipped,setShowShipped]=useState(false);
 
-  const outbound=orders.filter(o=>o.type==="OUT"&&o.status!=="Cancelled"&&(showShipped||o.status!=="Shipped"));
+  const outbound=orders.filter(o=>o.type==="OUT"&&o.status!=="Cancelled"&&(showShipped?o.status==="Shipped":o.status!=="Shipped"));
   const filtered=outbound.filter(o=>
     (!filterWh||o.warehouseCode===filterWh)&&
     (!filterCust||o.customerId===filterCust)&&
@@ -753,7 +752,7 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
   const openFreightConfirm=(o)=>{ setFreightFee(o.mktShipFee?String(o.mktShipFee):""); setFreightModal(o); };
   const doFreightConfirm=()=>{
     const o=freightModal; const fee=Number(freightFee||0);
-    setOrders(p=>p.map(x=>x.id===o.id?{...x,status:"Scheduled",confirmedDate:today.toISOString().split("T")[0],mktShipFee:fee,freightBy:"freight"}:x));
+    setOrders(p=>p.map(x=>x.id===o.id?{...x,status:"Scheduled",confirmedDate:today.toISOString().split("T")[0],mktShipFee:fee}:x));
     logActivity("OUT freight confirmed",o.containerNo+(fee>0?" · MKT "+money(fee):" · no MKT fee"),o.customerId,o.warehouseCode);
     setFreightModal(null);setFreightFee("");
   };
@@ -1026,10 +1025,10 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12,padding:"16px 20px",borderBottom:`1px solid ${C.border}`}}>
           <div>
             <div style={{fontWeight:800,fontSize:16,color:C.white}}>Outbound Orders</div>
-            <div style={{fontSize:12,color:C.muted,marginTop:2}}>{showShipped?"Including shipped":"Submitted & Scheduled"}</div>
+            <div style={{fontSize:12,color:C.muted,marginTop:2}}>{showShipped?"Shipped only":"Submitted & Scheduled"}</div>
           </div>
           <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
-            {isAdmin&&<label style={{display:"flex",alignItems:"center",gap:5,fontSize:12,color:showShipped?C.amber:C.muted,cursor:"pointer"}}><input type="checkbox" checked={showShipped} onChange={e=>setShowShipped(e.target.checked)}/>Show Shipped</label>}
+            {mayFull&&<label style={{display:"flex",alignItems:"center",gap:5,fontSize:12,color:showShipped?C.amber:C.muted,cursor:"pointer"}}><input type="checkbox" checked={showShipped} onChange={e=>setShowShipped(e.target.checked)}/>Show Shipped</label>}
             <select value={filterWh} onChange={e=>setFilterWh(e.target.value)} style={{...s.input,width:160}}><option value="">All Warehouses</option>{warehouses.map(w=><option key={w.id} value={w.code}>{w.code}</option>)}</select>
             <select value={filterCust} onChange={e=>setFilterCust(e.target.value)} style={{...s.input,width:150}}><option value="">All Customers</option>{customers.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select>
             <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="SKU / Container / PO# / Ref" style={{...s.input,width:200}}/>
@@ -1060,7 +1059,7 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
                   <td style={s.td}>
                     <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
                       {o.status==="Submitted"&&isFreight&&<Btn sm v="primary" onClick={()=>openFreightConfirm(o)}>Set Freight + Confirm</Btn>}
-                      {o.status==="Submitted"&&!isFreight&&<Tag label="Awaiting Freight" color="orange"/>}
+                      {o.status==="Submitted"&&!isFreight&&<Tag label="Awaiting Freight Cost" color="orange"/>}
                       {o.status==="Scheduled"&&mayAdd&&<Btn sm v="success" onClick={()=>openShip(o)}>Ship</Btn>}
                       {o.status==="Scheduled"&&isFreight&&<Btn sm v="ghost" onClick={()=>openFreightConfirm(o)} style={{color:C.blue,borderColor:C.blue+"55"}}>Edit Freight</Btn>}
                       {mayEdit&&!orderInvoiced(o)&&<Btn sm v="ghost" onClick={()=>{setForm(o);setModal("edit");}} style={{color:C.amber,borderColor:C.amber+"55"}}>Edit</Btn>}
@@ -1230,7 +1229,7 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
       )}
 
       {freightModal&&(
-        <Modal title="Freight Department — Confirm Order" onClose={()=>{setFreightModal(null);setFreightFee("");}}>
+        <Modal title="Freight Cost — Confirm Order" onClose={()=>{setFreightModal(null);setFreightFee("");}}>
           <div style={{background:C.input,borderRadius:8,padding:"14px 16px",marginBottom:16,fontSize:13}}>
             <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}><span style={{color:C.muted}}>Customer</span><span style={{fontWeight:700}}>{cust(freightModal.customerId)?.name}</span></div>
             <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}><span style={{color:C.muted}}>Container / Order</span><span style={{fontWeight:700,fontFamily:"monospace",color:C.amber}}>{freightModal.containerNo}</span></div>
@@ -1837,7 +1836,7 @@ function UserMgmt({users,setUsers,warehouses=[]}){
   };
   const setPerm=(id,lvl)=>setForm(f=>({...f,permissions:{...(f.permissions||{}),[id]:lvl}}));
   const toggleWh=(code)=>setForm(f=>({...f,allowedWarehouses:(f.allowedWarehouses||[]).includes(code)?f.allowedWarehouses.filter(x=>x!==code):[...(f.allowedWarehouses||[]),code]}));
-  const roleTag=(r)=>({admin:["Admin","amber"],freight:["Freight","purple"],warehouse:["Warehouse","teal"]}[r]||["Staff","blue"]);
+  const roleTag=(r)=>({admin:["Admin","amber"],warehouse:["Warehouse","teal"]}[r]||["Staff","blue"]);
   const permCount=(u)=>u.role==="admin"?"All":Object.values(u.permissions||{}).filter(v=>v&&v!=="none").length+" sections";
 
   return(
@@ -1871,7 +1870,7 @@ function UserMgmt({users,setUsers,warehouses=[]}){
             <TI label="Full Name *" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))}/>
             <TI label="Username *" value={form.username} onChange={e=>setForm(f=>({...f,username:e.target.value}))}/>
             <TI label="Password *" value={form.password} onChange={e=>setForm(f=>({...f,password:e.target.value}))}/>
-            <TS label="Role" value={form.role} onChange={e=>setForm(f=>({...f,role:e.target.value}))}><option value="staff">Staff</option><option value="freight">Freight Dept</option><option value="warehouse">Warehouse (own location)</option><option value="admin">Admin (full control)</option></TS>
+            <TS label="Role" value={form.role} onChange={e=>setForm(f=>({...f,role:e.target.value}))}><option value="staff">Staff</option><option value="warehouse">Warehouse (own location)</option><option value="admin">Admin (full control)</option></TS>
           </div>
           {form.role==="admin"?(
             <div style={{background:C.amberD,border:`1px solid ${C.amberB}`,borderRadius:8,padding:"12px 16px",fontSize:13,color:C.amber}}>Admin has full control of all sections and all warehouses.</div>
@@ -2653,7 +2652,7 @@ function WMSApp({initial, onSave, cloudStatus, onReload}){
 
   if(!session){
     return <Login customers={customers} users={users} adminPass={adminPass}
-      onStaff={(u)=>{setSession({kind:"staff",...u});setTab(u.role==="freight"?"outbound":"dashboard");}}
+      onStaff={(u)=>{setSession({kind:"staff",...u});setTab("dashboard");}}
       onCustomer={(c)=>{setSession({kind:"customer",customer:c});}}/>;
   }
 
@@ -2718,9 +2717,8 @@ function WMSApp({initial, onSave, cloudStatus, onReload}){
             ))}
           </div>
           <div style={{display:"flex",alignItems:"center",gap:10,flexShrink:0,marginLeft:12}}>
-            <div style={{textAlign:"right"}}><div style={{fontSize:12,fontWeight:700}}>{session.name}</div><div style={{fontSize:10,color:isAdmin?C.amber:C.muted}}>{isAdmin?"Administrator":session.role==="freight"?"Freight Dept":session.role==="warehouse"?"Warehouse":"Staff"}</div></div>
+            <div style={{textAlign:"right"}}><div style={{fontSize:12,fontWeight:700}}>{session.name}</div><div style={{fontSize:10,color:isAdmin?C.amber:C.muted}}>{isAdmin?"Administrator":session.role==="warehouse"?"Warehouse":"Staff"}</div></div>
             {isAdmin&&<span style={{background:C.amberD,border:`1px solid ${C.amberB}`,color:C.amber,fontSize:10,fontWeight:700,padding:"3px 8px",borderRadius:12}}>ADMIN</span>}
-            {session.role==="freight"&&<span style={{background:C.purpleD,border:`1px solid ${C.purple}44`,color:C.purple,fontSize:10,fontWeight:700,padding:"3px 8px",borderRadius:12}}>FREIGHT</span>}
             {session.role==="warehouse"&&<span style={{background:C.tealD,border:`1px solid ${C.teal}44`,color:C.teal,fontSize:10,fontWeight:700,padding:"3px 8px",borderRadius:12}}>{(session.allowedWarehouses||[])[0]||"WAREHOUSE"}</span>}
             <span title={cloudStatus==="error"?"Not connected to database — changes may not be saved":"Saved to cloud"} style={{fontSize:10,fontWeight:700,padding:"3px 8px",borderRadius:12,background:cloudStatus==="saving"?C.amberD:cloudStatus==="error"?C.redD:C.tealD,color:cloudStatus==="saving"?C.amber:cloudStatus==="error"?C.red:C.teal,border:`1px solid ${(cloudStatus==="saving"?C.amber:cloudStatus==="error"?C.red:C.teal)}44`}}>{cloudStatus==="saving"?"Saving…":cloudStatus==="error"?"● Offline":"● Cloud"}</span>
             {onReload&&<Btn sm v="ghost" onClick={onReload} title="Reload latest data from the database">Refresh</Btn>}
