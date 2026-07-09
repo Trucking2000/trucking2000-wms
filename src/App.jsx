@@ -203,6 +203,15 @@ function Tag({label,color="slate"}){
   const[bg,fg]=TAGS[color]||TAGS.slate;
   return (<span style={{background:bg,color:fg,border:"1px solid "+fg+"44",fontSize:10.5,fontWeight:700,letterSpacing:"0.05em",padding:"2px 8px",borderRadius:4,textTransform:"uppercase",whiteSpace:"nowrap",display:"inline-block"}}>{label}</span>);
 }
+// Short, color-coded label for a loading type
+function ltTag(lt){
+  const t=(lt||"").toLowerCase();
+  if(t.includes("full container"))return <Tag label="Full Cntr" color="amber"/>;
+  if(t.includes("f2f"))return <Tag label="F2F" color="blue"/>;
+  if(t.includes("f2p"))return <Tag label="F2P" color="purple"/>;
+  if(t.includes("p2p"))return <Tag label="P2P" color="teal"/>;
+  return <span style={{color:"#64748b"}}>-</span>;
+}
 function stTag(st){
   const m={
     "Submitted":["blue","Submitted"],"Scheduled":["amber","Scheduled"],
@@ -297,17 +306,8 @@ function Inbound({orders,setOrders,customers,warehouses,isAdmin,perm="full",logA
   const[recvModal,setRecvModal]=useState(null); // order pending receive
   const[recvDate,setRecvDate]=useState(today.toISOString().split("T")[0]);
 
-  // A container is "received" only when ALL of its SKU lines are received.
-  const allIn=orders.filter(o=>o.type==="IN"&&o.status!=="Cancelled");
-  const ckey=(o)=>o.containerNo+"|"+o.customerId+"|"+o.warehouseCode;
-  const containerFullyReceived=(()=>{
-    const m={};
-    allIn.forEach(o=>{const k=ckey(o); if(!(k in m))m[k]=true; if(o.status!=="Received")m[k]=false;});
-    return m;
-  })();
-  const inbound=allIn.filter(o=>showReceived
-    ? containerFullyReceived[ckey(o)]===true            // only fully-received containers
-    : containerFullyReceived[ckey(o)]!==true);          // anything still open (any line pending)
+  // "Show Received" lists every received order; otherwise show the open ones.
+  const inbound=orders.filter(o=>o.type==="IN"&&o.status!=="Cancelled"&&(showReceived?o.status==="Received":o.status!=="Received"));
   const filtered=inbound.filter(o=>
     (!filterWh||o.warehouseCode===filterWh)&&
     (!filterCust||o.customerId===filterCust)&&
@@ -460,14 +460,14 @@ function Inbound({orders,setOrders,customers,warehouses,isAdmin,perm="full",logA
             <select value={filterWh} onChange={e=>setFilterWh(e.target.value)} style={{...s.input,width:160}}><option value="">All Warehouses</option>{warehouses.map(w=><option key={w.id} value={w.code}>{w.code}</option>)}</select>
             <select value={filterCust} onChange={e=>setFilterCust(e.target.value)} style={{...s.input,width:150}}><option value="">All Customers</option>{customers.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select>
             <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="SKU / Container / PO# / Ref" style={{...s.input,width:200}}/>
-            <Btn sm v="ghost" onClick={()=>exportExcel("inbound.xls","Inbound",filtered.map(o=>({Submitted:o.submitted,ETA:o.eta,Customer:cust(o.customerId)?.name,Location:o.warehouseCode,Container:o.containerNo,Size:o.cntrSize,SKU:o.sku,Plts:o.plts,Units:o.units,Reference:o.reference,PO:o.ttsPo,Status:o.status})))} style={{color:C.green,borderColor:C.green+"55"}}>Export Excel</Btn>
+            <Btn sm v="ghost" onClick={()=>exportExcel("inbound.xls","Inbound",filtered.map(o=>({Submitted:o.submitted,ETA:o.eta,Customer:cust(o.customerId)?.name,Location:o.warehouseCode,Container:o.containerNo,Size:o.cntrSize,Loading_Type:o.loadingType,SKU:o.sku,Plts:o.plts,Units:o.units,Reference:o.reference,PO:o.ttsPo,Status:o.status})))} style={{color:C.green,borderColor:C.green+"55"}}>Export Excel</Btn>
             {mayAdd&&<Btn sm v="ghost" onClick={()=>setTplModal(true)} style={{color:C.teal,borderColor:C.teal+"55"}}>Templates ({inTemplates.length})</Btn>}
             {mayAdd&&<Btn sm v="primary" onClick={()=>{setForm(empty);setModal("add");}}>+ New Inbound</Btn>}
           </div>
         </div>
         <div style={{overflowX:"auto"}}>
           <table style={{width:"100%",borderCollapse:"collapse",minWidth:1100}}>
-            <thead><tr style={{background:C.bg}}>{["Submitted","ETA","Customer","Location","Container #","Size","SKU / Description","Plts","Units","Reference","T2 PO#","Status","Actions"].map(h=><th key={h} style={s.th}>{h}</th>)}</tr></thead>
+            <thead><tr style={{background:C.bg}}>{["Submitted","ETA","Customer","Location","Container #","Size","Loading Type","SKU / Description","Plts","Units","Reference","T2 PO#","Status","Actions"].map(h=><th key={h} style={s.th}>{h}</th>)}</tr></thead>
             <tbody>
               {(()=>{
                 // group filtered inbound by container (+customer+warehouse), preserving order
@@ -494,6 +494,7 @@ function Inbound({orders,setOrders,customers,warehouses,isAdmin,perm="full",logA
                           <td style={{...s.td,fontSize:11,color:C.teal,fontFamily:"monospace"}}>{o0.warehouseCode}</td>
                           <td style={{...s.td,fontFamily:"monospace",color:C.amber,fontWeight:800}}>{o0.containerNo}<div style={{fontSize:10,color:C.muted,fontWeight:400}}>{rows.length} SKUs</div></td>
                           <td style={s.td}><Tag label={o0.cntrSize} color="blue"/></td>
+                          <td style={{...s.td,fontSize:11}}>{ltTag(o0.loadingType)}</td>
                           <td style={{...s.td,fontSize:11,color:C.muted,fontStyle:"italic"}}>whole container</td>
                           <td style={{...s.td,fontWeight:800,color:C.teal}}>{sumPlts}</td>
                           <td style={{...s.td,fontWeight:800}}>{num(sumUnits)}</td>
@@ -516,6 +517,7 @@ function Inbound({orders,setOrders,customers,warehouses,isAdmin,perm="full",logA
                           <td style={{...s.td,fontSize:11,color:C.teal,fontFamily:"monospace"}}>{multi?"":o.warehouseCode}</td>
                           <td style={{...s.td,fontFamily:"monospace",color:C.amber,fontWeight:700,paddingLeft:multi?24:undefined}}>{multi?<span style={{color:C.muted,fontSize:11}}>↳</span>:o.containerNo}</td>
                           <td style={s.td}>{multi?"":<Tag label={o.cntrSize} color="blue"/>}</td>
+                          <td style={{...s.td,fontSize:11}}>{ltTag(o.loadingType)}</td>
                           <td style={s.td}>{o.sku}<div style={{fontSize:10,color:C.muted}}>{o.description}</div></td>
                           <td style={{...s.td,fontWeight:700,color:C.teal}}>{o.plts}</td>
                           <td style={{...s.td,fontWeight:700}}>{num(o.units)}</td>
@@ -1499,7 +1501,10 @@ function ActivityLog({activity,customers,warehouses}){
 // ============================================================
 // CUSTOMER MANAGEMENT (with projects + rate card)
 // ============================================================
-function CustomerMgmt({customers,setCustomers,isAdmin}){
+function CustomerMgmt({customers,setCustomers,isAdmin,perm="full"}){
+  const mayAdd=isAdmin||canAdd(perm);
+  const mayEdit=isAdmin||canEdit(perm);
+  const mayFull=isAdmin||canDelete(perm);
   const[modal,setModal]=useState(null);
   const[rcModal,setRcModal]=useState(null);
   const empty={name:"",contact:"",email:"",phone:"",address:"",billingTerms:"Net 30",status:"Active",projects:[],portalUser:"",portalPass:"",quoteSheets:[]};
@@ -1527,7 +1532,7 @@ function CustomerMgmt({customers,setCustomers,isAdmin}){
         </div>
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
           <Btn v="ghost" onClick={()=>exportExcel("customers.xls","Customers",customers.map(c=>({Customer_ID:c.id,Name:c.name,Contact:c.contact,Email:c.email,Phone:c.phone,Address:c.address,Projects:(c.projects||[]).join("; "),Terms:c.billingTerms,Portal_User:c.portalUser,Rate_Sheets:(c.quoteSheets||[]).length,Status:c.status})))} style={{color:C.green,borderColor:C.green+"55"}}>Export Excel</Btn>
-          {isAdmin&&<Btn v="primary" onClick={()=>{setForm({...empty,customId:""});setModal("add");}}>+ Add Customer</Btn>}
+          {mayAdd&&<Btn v="primary" onClick={()=>{setForm({...empty,customId:""});setModal("add");}}>+ Add Customer</Btn>}
         </div>
       </div>
 
@@ -1550,7 +1555,7 @@ function CustomerMgmt({customers,setCustomers,isAdmin}){
                   <td style={s.td}>
                     <div style={{display:"flex",gap:4}}>
                       <Btn sm v="ghost" onClick={()=>setRcModal(c)} style={{color:C.teal,borderColor:C.teal+"55"}}>Rate Card</Btn>
-                      {isAdmin&&<Btn sm v="ghost" onClick={()=>{setForm({...c,projects:c.projects||[]});setModal("edit");}} style={{color:C.amber,borderColor:C.amber+"55"}}>Edit</Btn>}
+                      {mayEdit&&<Btn sm v="ghost" onClick={()=>{setForm({...c,projects:c.projects||[]});setModal("edit");}} style={{color:C.amber,borderColor:C.amber+"55"}}>Edit</Btn>}
                     </div>
                   </td>
                 </tr>
@@ -1595,7 +1600,7 @@ function CustomerMgmt({customers,setCustomers,isAdmin}){
         </Modal>
       )}
 
-      {rcModal&&<RateCardModal customer={customers.find(c=>c.id===rcModal.id)||rcModal} setCustomers={setCustomers} onClose={()=>setRcModal(null)} isAdmin={isAdmin}/>}
+      {rcModal&&<RateCardModal customer={customers.find(c=>c.id===rcModal.id)||rcModal} setCustomers={setCustomers} onClose={()=>setRcModal(null)} isAdmin={mayEdit}/>}
     </div>
   );
 }
@@ -1709,7 +1714,10 @@ function RateCardModal({customer,setCustomers,onClose,isAdmin}){
 // ============================================================
 // CARRIERS
 // ============================================================
-function CarrierMgmt({carriers,setCarriers,isAdmin}){
+function CarrierMgmt({carriers,setCarriers,isAdmin,perm="full"}){
+  const mayAdd=isAdmin||canAdd(perm);
+  const mayEdit=isAdmin||canEdit(perm);
+  const mayFull=isAdmin||canDelete(perm);
   const[modal,setModal]=useState(null);
   const[form,setForm]=useState({name:"",scac:"",contact:"",phone:"",active:true});
   const save=()=>{
@@ -1725,7 +1733,7 @@ function CarrierMgmt({carriers,setCarriers,isAdmin}){
     <div style={{display:"flex",flexDirection:"column",gap:18}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div><h2 style={{margin:0,fontSize:20,fontWeight:800,color:C.white}}>Carriers</h2><div style={{fontSize:12,color:C.muted,marginTop:3}}>Freight carriers used on outbound orders &amp; BOLs</div></div>
-        {isAdmin&&<Btn v="primary" onClick={()=>{setForm({name:"",scac:"",contact:"",phone:"",active:true});setModal("add");}}>+ Add Carrier</Btn>}
+        {mayAdd&&<Btn v="primary" onClick={()=>{setForm({name:"",scac:"",contact:"",phone:"",active:true});setModal("add");}}>+ Add Carrier</Btn>}
       </div>
       <div style={{...s.card,padding:0,overflow:"hidden"}}>
         <table style={{width:"100%",borderCollapse:"collapse"}}>
@@ -1737,7 +1745,7 @@ function CarrierMgmt({carriers,setCarriers,isAdmin}){
               <td style={{...s.td,color:C.muted}}>{c.contact||"-"}</td>
               <td style={{...s.td,color:C.muted}}>{c.phone||"-"}</td>
               <td style={s.td}>{stTag(c.active!==false?"Active":"Disabled")}</td>
-              <td style={s.td}>{isAdmin&&<div style={{display:"flex",gap:4}}><Btn sm onClick={()=>{setForm({...c});setModal("edit");}}>Edit</Btn><Btn sm v="ghost" onClick={()=>setCarriers(p=>p.map(x=>x.id===c.id?{...x,active:!(x.active!==false)}:x))} style={{color:c.active!==false?C.red:C.green,borderColor:(c.active!==false?C.red:C.green)+"55"}}>{c.active!==false?"Disable":"Enable"}</Btn></div>}</td>
+              <td style={s.td}><div style={{display:"flex",gap:4}}>{mayEdit&&<Btn sm onClick={()=>{setForm({...c});setModal("edit");}}>Edit</Btn>}{mayFull&&<Btn sm v="ghost" onClick={()=>setCarriers(p=>p.map(x=>x.id===c.id?{...x,active:!(x.active!==false)}:x))} style={{color:c.active!==false?C.red:C.green,borderColor:(c.active!==false?C.red:C.green)+"55"}}>{c.active!==false?"Disable":"Enable"}</Btn>}</div></td>
             </tr>
           ))}</tbody>
         </table>
@@ -1760,7 +1768,10 @@ function CarrierMgmt({carriers,setCarriers,isAdmin}){
 // ============================================================
 // WAREHOUSES
 // ============================================================
-function WarehouseMgmt({warehouses,setWarehouses,isAdmin}){
+function WarehouseMgmt({warehouses,setWarehouses,isAdmin,perm="full"}){
+  const mayAdd=isAdmin||canAdd(perm);
+  const mayEdit=isAdmin||canEdit(perm);
+  const mayFull=isAdmin||canDelete(perm);
   const[modal,setModal]=useState(null);
   const[form,setForm]=useState({code:"",name:"",address:"",active:true});
   const save=()=>{
@@ -1776,7 +1787,7 @@ function WarehouseMgmt({warehouses,setWarehouses,isAdmin}){
     <div style={{display:"flex",flexDirection:"column",gap:18}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div><h2 style={{margin:0,fontSize:20,fontWeight:800,color:C.white}}>Warehouses</h2><div style={{fontSize:12,color:C.muted,marginTop:3}}>Locations used across the portal</div></div>
-        {isAdmin&&<Btn v="primary" onClick={()=>{setForm({code:"",name:"",address:"",active:true});setModal("add");}}>+ Add Warehouse</Btn>}
+        {mayAdd&&<Btn v="primary" onClick={()=>{setForm({code:"",name:"",address:"",active:true});setModal("add");}}>+ Add Warehouse</Btn>}
       </div>
       <div style={{...s.card,padding:0,overflow:"hidden"}}>
         <table style={{width:"100%",borderCollapse:"collapse"}}>
@@ -1787,7 +1798,7 @@ function WarehouseMgmt({warehouses,setWarehouses,isAdmin}){
               <td style={{...s.td,fontWeight:700}}>{w.name}</td>
               <td style={{...s.td,color:C.muted}}>{w.address||"-"}</td>
               <td style={s.td}>{stTag(w.active?"Active":"Disabled")}</td>
-              <td style={s.td}>{isAdmin&&<div style={{display:"flex",gap:4}}><Btn sm onClick={()=>{setForm({...w});setModal("edit");}}>Edit</Btn><Btn sm v="ghost" onClick={()=>setWarehouses(p=>p.map(x=>x.id===w.id?{...x,active:!x.active}:x))} style={{color:w.active?C.red:C.green,borderColor:(w.active?C.red:C.green)+"55"}}>{w.active?"Disable":"Enable"}</Btn></div>}</td>
+              <td style={s.td}><div style={{display:"flex",gap:4}}>{mayEdit&&<Btn sm onClick={()=>{setForm({...w});setModal("edit");}}>Edit</Btn>}{mayFull&&<Btn sm v="ghost" onClick={()=>setWarehouses(p=>p.map(x=>x.id===w.id?{...x,active:!x.active}:x))} style={{color:w.active?C.red:C.green,borderColor:(w.active?C.red:C.green)+"55"}}>{w.active?"Disable":"Enable"}</Btn>}</div></td>
             </tr>
           ))}</tbody>
         </table>
@@ -1924,6 +1935,7 @@ function BillingModule({orders,ledger,customers,invoices,setInvoices,isAdmin,log
   };
   const loadType=(o)=>{
     const lt=(o.loadingType||"").toUpperCase();
+    if(lt.includes("FULL CONTAINER"))return "FULL";
     if(lt.startsWith("F2F"))return "F2F";
     if(lt.startsWith("P2P"))return "P2P";
     return "F2P";
@@ -1934,21 +1946,34 @@ function BillingModule({orders,ledger,customers,invoices,setInvoices,isAdmin,log
   invoices.forEach(inv=>inv.lines.forEach(l=>billedKeys.add(l.key)));
 
   const charges=[];
-  // 1. Receiving + Transload charges from received inbound orders
-  orders.filter(o=>o.type==="IN"&&o.status==="Received").forEach(o=>{
+  // 1a. Unloading / forklift — ONE charge per received container (not per SKU line).
+  //     F2F & F2P → one unloading charge. P2P → one forklift charge. Full container → none.
+  const receivedIn=orders.filter(o=>o.type==="IN"&&o.status==="Received");
+  const contGroups={};
+  receivedIn.forEach(o=>{
+    const k=`${o.customerId}|${o.containerNo}|${o.receivedDate}`;
+    if(!contGroups[k])contGroups[k]=o;   // first line represents the container
+  });
+  Object.entries(contGroups).forEach(([k,o])=>{
+    const r=rateFor(o.customerId,o.receivedDate); if(!r)return;
+    const lt=loadType(o);
+    if(lt==="FULL")return;               // full container storage: no unload/forklift
+    let unload=0,unloadLbl="";
+    if(lt==="F2F"){unload=r.f2fUnload;unloadLbl="F2F Unloading";}
+    else if(lt==="P2P"){unload=r.p2pForklift;unloadLbl="P2P Forklift";}
+    else {unload=r.f2pUnload;unloadLbl="F2P Unloading";}
+    if(unload>0){
+      const key=`RCV-${o.customerId}-${o.containerNo}-${o.receivedDate}`;
+      if(!billedKeys.has(key))charges.push({key,customerId:o.customerId,group:"Receiving",date:o.receivedDate,container:o.containerNo,desc:`${unloadLbl} (1× per container) — ${o.containerNo}`,qty:1,rate:unload,amount:unload});
+    }
+  });
+
+  // 1b. Transload handling (per pallet) — still per SKU line
+  receivedIn.forEach(o=>{
     const r=rateFor(o.customerId,o.receivedDate); if(!r)return;
     const plts=Number(o.plts||0);
     const lt=loadType(o);
-    // Receiving (unload)
-    let unload=0,unloadLbl="";
-    if(lt==="F2F"){unload=r.f2fUnload;unloadLbl="F2F Unload";}
-    else if(lt==="P2P"){unload=r.p2pForklift;unloadLbl="P2P Forklift";}
-    else {unload=r.f2pUnload;unloadLbl="F2P Unload";}
-    if(unload>0){
-      const key=`RCV-${o.id}`;
-      if(!billedKeys.has(key))charges.push({key,customerId:o.customerId,group:"Receiving",date:o.receivedDate,container:o.containerNo,desc:`${unloadLbl} — ${o.containerNo}`,qty:1,rate:unload,amount:unload});
-    }
-    // Transload (handling per pallet, palletize, wrap, etc.)
+    if(lt==="FULL")return;               // full container: storage only
     let trl=0,parts=[];
     if(lt==="F2P"){ trl=(r.f2pPalletize+r.f2pPallet+r.f2pWrap)*plts; parts.push("palletize/pallet/wrap"); }
     else if(lt==="F2F"){ trl=(r.f2fSort+r.f2fHandling+r.f2fReload)*plts; parts.push("sort/handle/reload"); }
@@ -2715,7 +2740,7 @@ function WMSApp({initial, onSave, cloudStatus, onReload}){
         {tab==="activity"&&canView(permOf("activity"))&&<ActivityLog activity={activity} customers={customers} warehouses={scopedWarehouses}/>}
         {tab==="billing"&&canView(permOf("billing"))&&<BillingModule orders={orders} ledger={ledger} customers={customers} invoices={invoices} setInvoices={setInvoices} isAdmin={isAdmin} perm={permOf("billing")} logActivity={logActivity}/>}
         {tab==="customers"&&canView(permOf("customers"))&&<CustomerMgmt customers={customers} setCustomers={setCustomers} isAdmin={isAdmin} perm={permOf("customers")}/>}
-        {tab==="carriers"&&canView(permOf("carriers"))&&<CarrierMgmt carriers={carriers} setCarriers={setCarriers} isAdmin={isAdmin}/>}
+        {tab==="carriers"&&canView(permOf("carriers"))&&<CarrierMgmt carriers={carriers} setCarriers={setCarriers} isAdmin={isAdmin} perm={permOf("carriers")}/>}
         {tab==="warehouses"&&canView(permOf("warehouses"))&&<WarehouseMgmt warehouses={warehouses} setWarehouses={setWarehouses} isAdmin={isAdmin} perm={permOf("warehouses")}/>}
         {tab==="users"&&isAdmin&&<UserMgmt users={users} setUsers={setUsers} warehouses={warehouses}/>}
       </div>
