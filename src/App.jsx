@@ -1599,13 +1599,13 @@ function CustomerMgmt({customers,setCustomers,isAdmin,perm="full"}){
         </Modal>
       )}
 
-      {rcModal&&<RateCardModal customer={customers.find(c=>c.id===rcModal.id)||rcModal} setCustomers={setCustomers} onClose={()=>setRcModal(null)} isAdmin={mayEdit}/>}
+      {rcModal&&<RateCardModal customer={customers.find(c=>c.id===rcModal.id)||rcModal} setCustomers={setCustomers} onClose={()=>setRcModal(null)} isAdmin={mayEdit} mayFull={mayFull}/>}
     </div>
   );
 }
 
 // Rate Card modal - manage quote sheets per customer
-function RateCardModal({customer,setCustomers,onClose,isAdmin}){
+function RateCardModal({customer,setCustomers,onClose,isAdmin,mayFull=false}){
   const[editing,setEditing]=useState(null);
   const sheets=customer.quoteSheets||[];
   const blank=()=>({id:"qs"+uid(),quoteNo:"QT-"+new Date().getFullYear()+"-"+String(Math.floor(Math.random()*900)+100),effectiveDate:today.toISOString().split("T")[0],expiryDate:dFwd(365),status:"Active",rates:emptyRC()});
@@ -1698,11 +1698,11 @@ function RateCardModal({customer,setCustomers,onClose,isAdmin}){
               </div>
               <div style={{fontSize:12,color:C.muted,marginTop:4}}>{fmtD(qs.effectiveDate)} – {fmtD(qs.expiryDate)} · Free days: <strong style={{color:C.blue}}>{qs.rates.freeDays||0}d</strong> · Storage: <strong style={{color:C.white}}>${qs.rates.storagePerPallet}/plt/day</strong></div>
             </div>
-            {isAdmin&&<div style={{display:"flex",gap:6}}>
-              <Btn sm onClick={()=>setEditing(qs)}>Edit</Btn>
-              <Btn sm v="ghost" onClick={()=>duplicateSheet(qs)} style={{color:C.teal,borderColor:C.teal+"55"}}>Duplicate</Btn>
-              <Btn sm v="danger" onClick={()=>delSheet(qs.id)}>Delete</Btn>
-            </div>}
+            <div style={{display:"flex",gap:6}}>
+              {isAdmin&&<Btn sm onClick={()=>setEditing(qs)}>Edit</Btn>}
+              {isAdmin&&<Btn sm v="ghost" onClick={()=>duplicateSheet(qs)} style={{color:C.teal,borderColor:C.teal+"55"}}>Duplicate</Btn>}
+              {mayFull&&<Btn sm v="danger" onClick={()=>delSheet(qs.id)}>Delete</Btn>}
+            </div>
           </div>
         </div>
       ))}
@@ -1915,7 +1915,10 @@ function UserMgmt({users,setUsers,warehouses=[]}){
 // Invoice = source of truth. Charges: Receiving, Transload,
 // Storage (from ledger aging), Outbound handling/shipping.
 // ============================================================
-function BillingModule({orders,ledger,customers,invoices,setInvoices,isAdmin,logActivity}){
+function BillingModule({orders,ledger,customers,invoices,setInvoices,isAdmin,perm="full",logActivity}){
+  const mayAdd=isAdmin||canAdd(perm);
+  const mayEdit=isAdmin||canEdit(perm);
+  const mayFull=isAdmin||canDelete(perm);
   const[view,setView]=useState("unbilled"); // unbilled | invoices
   const[filterCust,setFilterCust]=useState("");
   const[searchC,setSearchC]=useState(""); // search by container
@@ -2132,7 +2135,7 @@ function BillingModule({orders,ledger,customers,invoices,setInvoices,isAdmin,log
               <Btn sm v="ghost" onClick={()=>exportExcel("unbilled_charges.xls","Unbilled",filtered.map(c=>({Type:c.group,Date:c.date,Customer:cust(c.customerId)?.name,Container:c.container,Description:c.desc,Qty:c.qty,Rate:c.rate,Amount:c.amount})))} style={{color:C.green,borderColor:C.green+"55"}}>Excel</Btn>
               <Btn sm v="ghost" onClick={()=>{const all={};filtered.forEach(c=>all[c.key]=true);setSel(all);}}>Select All</Btn>
               <Btn sm v="ghost" onClick={()=>setSel({})}>Clear</Btn>
-              {isAdmin&&<Btn sm v="primary" onClick={()=>setPreview(true)} style={{opacity:selectedCharges.length?1:0.5}}>Create Invoice ({selectedCharges.length}) · {money(selTotal)}</Btn>}
+              {mayAdd&&<Btn sm v="primary" onClick={()=>setPreview(true)} style={{opacity:selectedCharges.length?1:0.5}}>Create Invoice ({selectedCharges.length}) · {money(selTotal)}</Btn>}
             </div>
           </div>
           <div style={{overflowX:"auto"}}>
@@ -2187,8 +2190,8 @@ function BillingModule({orders,ledger,customers,invoices,setInvoices,isAdmin,log
                       <div style={{display:"flex",gap:4}}>
                         <Btn sm v="ghost" onClick={()=>setViewInv(inv)} style={{color:C.blue,borderColor:C.blue+"55"}}>View</Btn>
                         <Btn sm v="ghost" onClick={()=>printInvoice(inv)}>Print</Btn>
-                        {isAdmin&&<Btn sm v="ghost" onClick={()=>markPaid(inv.id)} style={{color:inv.status==="Paid"?C.orange:C.green,borderColor:(inv.status==="Paid"?C.orange:C.green)+"55"}}>{inv.status==="Paid"?"Unpay":"Mark Paid"}</Btn>}
-                        {isAdmin&&<Btn sm v="danger" onClick={()=>delInvoice(inv.id)}>Del</Btn>}
+                        {mayEdit&&<Btn sm v="ghost" onClick={()=>markPaid(inv.id)} style={{color:inv.status==="Paid"?C.orange:C.green,borderColor:(inv.status==="Paid"?C.orange:C.green)+"55"}}>{inv.status==="Paid"?"Unpay":"Mark Paid"}</Btn>}
+                        {mayFull&&<Btn sm v="danger" onClick={()=>delInvoice(inv.id)}>Del</Btn>}
                       </div>
                     </td>
                   </tr>
@@ -2255,7 +2258,7 @@ function BillingModule({orders,ledger,customers,invoices,setInvoices,isAdmin,log
             <span style={{fontWeight:700,color:C.white}}>TOTAL</span>
             <span style={{fontWeight:800,fontSize:22,color:C.green,fontFamily:"monospace"}}>{money(viewInv.total)}</span>
           </div>
-          <div style={{display:"flex",gap:8}}><Btn v="primary" onClick={()=>printInvoice(viewInv)}>Print / PDF</Btn>{isAdmin&&<Btn v={viewInv.status==="Paid"?"default":"success"} onClick={()=>{markPaid(viewInv.id);setViewInv({...viewInv,status:viewInv.status==="Paid"?"Unpaid":"Paid"});}}>{viewInv.status==="Paid"?"Mark Unpaid":"Mark Paid"}</Btn>}<Btn onClick={()=>setViewInv(null)}>Close</Btn></div>
+          <div style={{display:"flex",gap:8}}><Btn v="primary" onClick={()=>printInvoice(viewInv)}>Print / PDF</Btn>{mayEdit&&<Btn v={viewInv.status==="Paid"?"default":"success"} onClick={()=>{markPaid(viewInv.id);setViewInv({...viewInv,status:viewInv.status==="Paid"?"Unpaid":"Paid"});}}>{viewInv.status==="Paid"?"Mark Unpaid":"Mark Paid"}</Btn>}<Btn onClick={()=>setViewInv(null)}>Close</Btn></div>
         </Modal>
       )}
     </div>
