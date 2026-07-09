@@ -26,31 +26,19 @@ export async function loadAll() {
   }
 }
 
-// Save one collection (whole array). Merge-by-id first so concurrent adds from
-// other users are not lost, then write. Records are matched on their `id`.
+// Save one collection (the whole array) to the cloud.
+//
+// Last-write-wins: whatever the app currently holds becomes the stored copy.
+// This is important for correctness — an earlier version tried to "merge" by
+// unioning with the cloud copy, which silently resurrected deleted records
+// (e.g. undoing a receive removed an inventory line, then the merge put it back).
+// If two people edit the exact same collection within the same second, the later
+// save wins; the Refresh button re-pulls the latest.
 export async function saveCollection(key, rows) {
   try {
-    // re-fetch current cloud copy and union by id (local wins on conflicts)
-    let merged = rows;
-    try {
-      const { data } = await supabase.from("app_data").select("value").eq("key", key).maybeSingle();
-      const cloud = (data && data.value) || [];
-      if (Array.isArray(cloud) && Array.isArray(rows)) {
-        const byId = new Map();
-        cloud.forEach((r) => { if (r && r.id != null) byId.set(r.id, r); });
-        rows.forEach((r) => { if (r && r.id != null) byId.set(r.id, r); });
-        // keep only ids present locally (so local deletes are respected),
-        // but include any brand-new cloud ids the local set hasn't seen yet
-        const localIds = new Set(rows.map((r) => r && r.id).filter((x) => x != null));
-        merged = rows.slice();
-        cloud.forEach((r) => { if (r && r.id != null && !localIds.has(r.id)) merged.push(r); });
-        merged = merged.map((r) => (r && r.id != null ? byId.get(r.id) : r));
-      }
-    } catch (_) { /* if merge fetch fails, just write local rows */ }
-
     const { error } = await supabase
       .from("app_data")
-      .upsert({ key, value: merged, updated_at: new Date().toISOString() }, { onConflict: "key" });
+      .upsert({ key, value: rows, updated_at: new Date().toISOString() }, { onConflict: "key" });
     if (error) throw error;
     return { ok: true };
   } catch (e) {

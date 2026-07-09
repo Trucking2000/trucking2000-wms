@@ -431,12 +431,16 @@ function Inbound({orders,setOrders,customers,warehouses,isAdmin,perm="full",logA
     setTplModal(false);setModal("add");
   };
   const unreceiveOrder=(o)=>{
-    if(!window.confirm("Undo receive for "+o.containerNo+"? This removes its inventory ledger entry (only if nothing has shipped out from it)."))return;
-    // block if the linked ledger has movements
-    // handled by parent state; we check via a flag passed down is complex, so guard here optimistically
+    // Never leave inventory without an owning inbound order.
+    const l=o.ledgerId?ledger.find(x=>x.id===o.ledgerId):null;
+    if(l&&(l.movements||[]).length>0){
+      alert("Cannot undo receive for "+o.containerNo+": stock has already shipped out from this inventory.\n\nUndo the outbound shipment(s) first.");
+      return;
+    }
+    if(!window.confirm("Undo receive for "+o.containerNo+"? This removes its inventory entry."))return;
     setOrders(p=>p.map(x=>x.id===o.id?{...x,status:"Scheduled",receivedDate:"",ledgerId:""}:x));
-    if(o.ledgerId)setLedger(p=>p.filter(l=>l.id!==o.ledgerId||(l.movements&&l.movements.length>0)));
-    logActivity("IN receive undone (admin)",o.containerNo,o.customerId,o.warehouseCode);
+    if(o.ledgerId)setLedger(p=>p.filter(x=>x.id!==o.ledgerId));
+    logActivity("IN receive undone",o.containerNo,o.customerId,o.warehouseCode);
   };
 
   return(
@@ -1323,7 +1327,8 @@ function History({orders,customers,warehouses}){
 // ============================================================
 // INVENTORY LEDGER - grouped, running balance (IN -> OUT -> BAL)
 // ============================================================
-function InventoryLedger({ledger,customers,warehouses}){
+function InventoryLedger({ledger,setLedger,orders=[],customers,warehouses,isAdmin,perm="full",logActivity}){
+  const mayFull=isAdmin||canDelete(perm);
   const[filterWh,setFilterWh]=useState("");
   const[filterCust,setFilterCust]=useState("");
   const[search,setSearch]=useState("");
@@ -1331,6 +1336,17 @@ function InventoryLedger({ledger,customers,warehouses}){
   const cust=(id)=>customers.find(c=>c.id===id);
 
   const balOf=(l)=>{const o=(l.movements||[]).reduce((a,m)=>({p:a.p+(m.outPlts||0),u:a.u+(m.outUnits||0)}),{p:0,u:0});return {plts:l.inPlts-o.p,units:l.inUnits-o.u};};
+
+  // An inventory line is "orphaned" when no received inbound order points at it.
+  // This can only happen from older data created before the undo-receive fix.
+  const linkedIds=new Set(orders.filter(o=>o.type==="IN"&&o.ledgerId).map(o=>o.ledgerId));
+  const isOrphan=(l)=>!linkedIds.has(l.id);
+  const orphans=ledger.filter(isOrphan);
+  const removeOrphan=(l)=>{
+    if(!window.confirm(`Delete orphaned inventory ${l.containerNo} / ${l.sku}?\n\nNo inbound order points at this line. Deleting it removes ${balOf(l).plts} plt / ${num(balOf(l).units)} u from on-hand stock. This cannot be undone.`))return;
+    setLedger(p=>p.filter(x=>x.id!==l.id));
+    logActivity&&logActivity("Inventory orphan removed",l.containerNo+" / "+l.sku,l.customerId,l.warehouseCode);
+  };
 
   const filtered=ledger.filter(l=>
     (!filterWh||l.warehouseCode===filterWh)&&
@@ -1362,6 +1378,25 @@ function InventoryLedger({ledger,customers,warehouses}){
         <KPI label="Balance Pallets" value={num(balPlts)} color={C.amber}/>
         <KPI label="Balance Units" value={num(balUnits)} color={C.green}/>
       </div>
+
+      {mayFull&&orphans.length>0&&(
+        <div style={{background:C.redD,border:`1px solid ${C.red}44`,borderRadius:8,padding:"14px 16px"}}>
+          <div style={{fontWeight:800,color:C.red,fontSize:13,marginBottom:6}}>⚠ {orphans.length} orphaned inventory line{orphans.length>1?"s":""}</div>
+          <div style={{fontSize:12,color:C.muted,marginBottom:10}}>
+            No inbound order points at {orphans.length>1?"these lines":"this line"}, so {orphans.length>1?"they are":"it is"} inflating your on-hand stock.
+            This came from data created before the undo-receive fix. Review and remove.
+          </div>
+          {orphans.map(l=>{const b=balOf(l);return(
+            <div key={l.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,background:C.input,borderRadius:6,padding:"8px 12px",marginBottom:6}}>
+              <div style={{fontSize:12}}>
+                <span style={{fontFamily:"monospace",color:C.amber,fontWeight:700}}>{l.containerNo}</span>
+                <span style={{color:C.muted}}> · {l.sku} · in {fmtD(l.ibDate)} · on hand {b.plts} plt / {num(b.units)} u</span>
+              </div>
+              <Btn sm v="danger" onClick={()=>removeOrphan(l)}>Delete</Btn>
+            </div>
+          );})}
+        </div>
+      )}
 
       <div style={{...s.card,padding:0,overflow:"hidden"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12,padding:"16px 20px",borderBottom:`1px solid ${C.border}`}}>
@@ -2737,7 +2772,7 @@ function WMSApp({initial, onSave, cloudStatus, onReload}){
         {tab==="inbound"&&canView(permOf("inbound"))&&<Inbound orders={scopedOrders} setOrders={setOrders} customers={customers} warehouses={scopedWarehouses} isAdmin={isAdmin} perm={permOf("inbound")} logActivity={logActivity} setLedger={setLedger} ledger={scopedLedger} invoices={invoices} templates={templates} setTemplates={setTemplates}/>}
         {tab==="outbound"&&canView(permOf("outbound"))&&<Outbound orders={scopedOrders} setOrders={setOrders} customers={customers} warehouses={scopedWarehouses} carriers={carriers} ledger={scopedLedger} setLedger={setLedger} isAdmin={isAdmin} perm={permOf("outbound")} role={session.role} logActivity={logActivity} invoices={invoices} templates={templates} setTemplates={setTemplates}/>}
         {tab==="history"&&canView(permOf("history"))&&<History orders={scopedOrders} customers={customers} warehouses={scopedWarehouses}/>}
-        {tab==="inventory"&&canView(permOf("inventory"))&&<InventoryLedger ledger={scopedLedger} customers={customers} warehouses={scopedWarehouses}/>}
+        {tab==="inventory"&&canView(permOf("inventory"))&&<InventoryLedger ledger={scopedLedger} setLedger={setLedger} orders={orders} customers={customers} warehouses={scopedWarehouses} isAdmin={isAdmin} perm={permOf("inventory")} logActivity={logActivity}/>}
         {tab==="activity"&&canView(permOf("activity"))&&<ActivityLog activity={activity} customers={customers} warehouses={scopedWarehouses}/>}
         {tab==="billing"&&canView(permOf("billing"))&&<BillingModule orders={orders} ledger={ledger} customers={customers} invoices={invoices} setInvoices={setInvoices} isAdmin={isAdmin} perm={permOf("billing")} logActivity={logActivity}/>}
         {tab==="customers"&&canView(permOf("customers"))&&<CustomerMgmt customers={customers} setCustomers={setCustomers} isAdmin={isAdmin} perm={permOf("customers")}/>}
