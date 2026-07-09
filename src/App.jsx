@@ -191,7 +191,7 @@ const INIT_USERS=[
 // ============================================================
 const s={
   card: {background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"20px 24px"},
-  input:{background:C.input,border:`1px solid ${C.border}`,color:C.white,borderRadius:6,padding:"8px 12px",fontSize:13,outline:"none",width:"100%",boxSizing:"border-box"},
+  input:{background:C.input,border:`1px solid ${C.border}`,color:C.white,borderRadius:6,padding:"8px 12px",fontSize:13,outline:"none",width:"100%",boxSizing:"border-box",colorScheme:"dark"},
   label:{fontSize:11,fontWeight:700,color:C.muted,letterSpacing:"0.08em",textTransform:"uppercase",display:"block",marginBottom:4},
   th:   {textAlign:"left",padding:"10px 12px",fontSize:10,color:C.muted,fontWeight:700,letterSpacing:"0.06em",textTransform:"uppercase",borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"},
   td:   {padding:"10px 12px",borderBottom:`1px solid ${C.borderL}`,fontSize:12.5,color:C.white,verticalAlign:"middle"},
@@ -297,7 +297,17 @@ function Inbound({orders,setOrders,customers,warehouses,isAdmin,perm="full",logA
   const[recvModal,setRecvModal]=useState(null); // order pending receive
   const[recvDate,setRecvDate]=useState(today.toISOString().split("T")[0]);
 
-  const inbound=orders.filter(o=>o.type==="IN"&&o.status!=="Cancelled"&&(showReceived?o.status==="Received":o.status!=="Received"));
+  // A container is "received" only when ALL of its SKU lines are received.
+  const allIn=orders.filter(o=>o.type==="IN"&&o.status!=="Cancelled");
+  const ckey=(o)=>o.containerNo+"|"+o.customerId+"|"+o.warehouseCode;
+  const containerFullyReceived=(()=>{
+    const m={};
+    allIn.forEach(o=>{const k=ckey(o); if(!(k in m))m[k]=true; if(o.status!=="Received")m[k]=false;});
+    return m;
+  })();
+  const inbound=allIn.filter(o=>showReceived
+    ? containerFullyReceived[ckey(o)]===true            // only fully-received containers
+    : containerFullyReceived[ckey(o)]!==true);          // anything still open (any line pending)
   const filtered=inbound.filter(o=>
     (!filterWh||o.warehouseCode===filterWh)&&
     (!filterCust||o.customerId===filterCust)&&
@@ -673,7 +683,7 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
   const scheduled=openOut.filter(o=>o.status==="Scheduled").length;
 
   // available ledger lines for the selected customer (with balance > 0)
-  const balOf=(l)=>{const o=l.movements.reduce((a,m)=>({p:a.p+(m.outPlts||0),u:a.u+(m.outUnits||0)}),{p:0,u:0});return {plts:l.inPlts-o.p,units:l.inUnits-o.u};};
+  const balOf=(l)=>{const o=(l.movements||[]).reduce((a,m)=>({p:a.p+(m.outPlts||0),u:a.u+(m.outUnits||0)}),{p:0,u:0});return {plts:l.inPlts-o.p,units:l.inUnits-o.u};};
   const availLedger=ledger.filter(l=>l.customerId===form.customerId&&(balOf(l).units>0||balOf(l).plts>0)).sort((a,b)=>(a.containerNo||"").localeCompare(b.containerNo||"")||(a.sku||"").localeCompare(b.sku||""));
 
   const save=()=>{
@@ -697,8 +707,8 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
       }
       const batch="B"+uid();
       const newOrders=chosen.map((l,i)=>({
-        type:"OUT",submitted:form.submitted,eta:"",etd:form.etd,customerId:form.customerId,project:form.project||l.project,warehouseCode:l.warehouseCode,
-        containerNo:l.containerNo,cntrSize:"",loadingType:"",sku:l.sku,description:l.description,
+        type:"OUT",submitted:form.submitted,eta:"",etd:form.etd,customerId:l.customerId,project:l.project||form.project||"",warehouseCode:l.warehouseCode,
+        containerNo:l.containerNo,cntrSize:"",loadingType:l.loadingType||"",sku:l.sku,description:l.description,
         plts:Number(pick[l.id].plts||0),units:Number(pick[l.id].units||0),reference:form.reference,ttsPo:l.ttsPo||"",notes:form.notes,
         status:"Submitted",shipMode:form.shipMode,carrierId:form.carrierId,mktShipFee:"",serviceLines:i===0?cleanLines:[],
         docCount:0,confirmedDate:"",receivedDate:"",shippedDate:"",ledgerId:l.id,batchId:batch,id:"O"+uid()
@@ -709,25 +719,31 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
       return;
     }
 
-    // SINGLE MODE
-    if(!form.containerNo){alert("Container/Order # is required.");return;}
+    // SINGLE MODE — every outbound must ship from inventory (no manual entry)
+    if(!form.ledgerId){alert("Ship From Inventory is required. Select the inventory item this order ships from, so stock can be deducted.");return;}
+    const src=ledger.find(x=>x.id===form.ledgerId);
+    if(!src){alert("The selected inventory item no longer exists. Choose another.");return;}
     const plts=Number(form.plts||0);
     const units=Number(form.units||0);
     if(plts<=0&&units<=0){alert("Quantity cannot be 0. Enter pallets and/or units to ship.");return;}
-    if(form.ledgerId){
-      const l=ledger.find(x=>x.id===form.ledgerId);
-      if(l){
-        const b=balOf(l);
-        if(plts>b.plts){alert(`Cannot process: ${plts} pallets exceeds available balance of ${b.plts} pallets for ${l.containerNo}.`);return;}
-        if(units>b.units){alert(`Cannot process: ${num(units)} units exceeds available balance of ${num(b.units)} units for ${l.containerNo}.`);return;}
-      }
+    // An already-shipped order's movement is already deducted from the balance,
+    // so only check availability for orders that haven't shipped yet.
+    if(form.status!=="Shipped"){
+      const b=balOf(src);
+      if(plts>b.plts){alert(`Cannot process: ${plts} pallets exceeds available balance of ${b.plts} pallets for ${src.containerNo}.`);return;}
+      if(units>b.units){alert(`Cannot process: ${num(units)} units exceeds available balance of ${num(b.units)} units for ${src.containerNo}.`);return;}
     }
+    // These always mirror the inbound/inventory record — never free text.
+    const locked={
+      containerNo:src.containerNo, sku:src.sku, description:src.description,
+      warehouseCode:src.warehouseCode, project:src.project||"", customerId:src.customerId,
+    };
     if(modal==="add"){
-      const o={...form,id:"O"+uid(),plts,units,mktShipFee:Number(form.mktShipFee||0),serviceLines:cleanLines};
+      const o={...form,...locked,id:"O"+uid(),plts,units,mktShipFee:Number(form.mktShipFee||0),serviceLines:cleanLines};
       setOrders(p=>[o,...p]);
-      logActivity("OUT order created",form.containerNo,form.customerId,form.warehouseCode);
+      logActivity("OUT order created",locked.containerNo,locked.customerId,locked.warehouseCode);
     } else {
-      setOrders(p=>p.map(o=>o.id===form.id?{...form,plts,units,mktShipFee:Number(form.mktShipFee||0),serviceLines:cleanLines}:o));
+      setOrders(p=>p.map(o=>o.id===form.id?{...form,...locked,plts,units,mktShipFee:Number(form.mktShipFee||0),serviceLines:cleanLines}:o));
     }
     setModal(null);
   };
@@ -739,24 +755,33 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
     logActivity("OUT freight confirmed",o.containerNo+(fee>0?" · MKT "+money(fee):" · no MKT fee"),o.customerId,o.warehouseCode);
     setFreightModal(null);setFreightFee("");
   };
+  // Find the inventory line an order should draw from. Uses the stored link when
+  // present; otherwise falls back to matching container + SKU for the customer.
+  const resolveLedger=(o)=>{
+    if(o.ledgerId){const l=ledger.find(x=>x.id===o.ledgerId);if(l)return l;}
+    const cands=ledger.filter(l=>l.customerId===o.customerId&&l.containerNo===o.containerNo&&(!o.sku||l.sku===o.sku));
+    if(cands.length===1)return cands[0];
+    const withBal=cands.filter(l=>{const b=balOf(l);return b.plts>0||b.units>0;});
+    return withBal.length===1?withBal[0]:null;
+  };
   const shipOrder=(o,dateStr)=>{
     const sd=dateStr||today.toISOString().split("T")[0];
-    // final balance check if shipping from inventory
-    if(o.ledgerId){
-      const l=ledger.find(x=>x.id===o.ledgerId);
-      if(l){
-        const b=balOf(l);
-        if(Number(o.plts||0)>b.plts||Number(o.units||0)>b.units){
-          alert(`Cannot ship: quantity exceeds current balance (${b.plts} plt / ${num(b.units)} u available). Edit the order first.`);
-          return;
-        }
-      }
+    const l=resolveLedger(o);
+    if(!l){
+      alert("Cannot ship: this order isn't linked to any inventory on hand, so the stock can't be deducted.\n\nOpen Edit on the order and choose the inventory item it ships from.");
+      return false;
     }
-    setOrders(p=>p.map(x=>x.id===o.id?{...x,status:"Shipped",shippedDate:sd}:x));
-    if(o.ledgerId){
-      setLedger(p=>p.map(l=>l.id===o.ledgerId?{...l,movements:[...l.movements,{date:sd,outPlts:Number(o.plts||0),outUnits:Number(o.units||0),ref:o.reference||o.containerNo}]}:l));
+    const b=balOf(l);
+    const pp=Number(o.plts||0), uu=Number(o.units||0);
+    if(pp<=0&&uu<=0){alert("Cannot ship: quantity is 0.");return false;}
+    if(pp>b.plts||uu>b.units){
+      alert(`Cannot ship: quantity exceeds current balance (${b.plts} plt / ${num(b.units)} u available). Edit the order first.`);
+      return false;
     }
+    setOrders(p=>p.map(x=>x.id===o.id?{...x,status:"Shipped",shippedDate:sd,ledgerId:l.id}:x));
+    setLedger(p=>p.map(x=>x.id===l.id?{...x,movements:[...(x.movements||[]),{date:sd,outPlts:pp,outUnits:uu,ref:o.reference||o.containerNo}]}:x));
     logActivity("OUT shipped",o.containerNo,o.customerId,o.warehouseCode);
+    return true;
   };
   const openShip=(o)=>{ setShipDate(today.toISOString().split("T")[0]); setShipModal(o); };
   const unshipOrder=(o)=>{
@@ -766,10 +791,11 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
     if(o.ledgerId){
       setLedger(p=>p.map(l=>{
         if(l.id!==o.ledgerId)return l;
+        const movs=l.movements||[];
         const ref=o.reference||o.containerNo;
-        const idx=l.movements.map((m,i)=>({m,i})).reverse().find(x=>x.m.ref===ref&&Number(x.m.outUnits||0)===Number(o.units||0)&&Number(x.m.outPlts||0)===Number(o.plts||0));
+        const idx=movs.map((m,i)=>({m,i})).reverse().find(x=>x.m.ref===ref&&Number(x.m.outUnits||0)===Number(o.units||0)&&Number(x.m.outPlts||0)===Number(o.plts||0));
         if(!idx)return l;
-        return {...l,movements:l.movements.filter((_,i)=>i!==idx.i)};
+        return {...l,movements:movs.filter((_,i)=>i!==idx.i)};
       }));
     }
     logActivity("OUT ship undone (admin)",o.containerNo,o.customerId,o.warehouseCode);
@@ -781,8 +807,10 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
     logActivity("OUT voided",o.containerNo,o.customerId,o.warehouseCode);
   };
   const duplicateOrder=(o)=>{
-    const{id,status,confirmedDate,receivedDate,shippedDate,ledgerId,...rest}=o;
-    setForm({...rest,submitted:today.toISOString().split("T")[0],etd:"",status:"Submitted",mktShipFee:"",serviceLines:(o.serviceLines||[]).map(l=>({...l}))});
+    const{id,status,confirmedDate,receivedDate,shippedDate,...rest}=o;
+    // keep ledgerId so the copy stays linked to inventory (required for shipping)
+    const stillExists=ledger.some(l=>l.id===o.ledgerId);
+    setForm({...rest,ledgerId:stillExists?o.ledgerId:"",submitted:today.toISOString().split("T")[0],etd:"",status:"Submitted",mktShipFee:"",serviceLines:(o.serviceLines||[]).map(l=>({...l}))});
     setModal("add");
   };
   const saveAsTemplate=()=>{
@@ -1052,9 +1080,18 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
       {modal&&(
         <Modal title={modal==="add"?"New Outbound Order":"Edit Outbound Order"} onClose={()=>setModal(null)} wide>
           <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12,marginBottom:16}}>
-            <TS label="Customer *" value={form.customerId} onChange={e=>setForm(f=>({...f,customerId:e.target.value,project:"",ledgerId:""}))}><option value="">Select...</option>{customers.filter(c=>c.status==="Active").map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</TS>
-            <TS label="Project" value={form.project} onChange={e=>setForm(f=>({...f,project:e.target.value}))}><option value="">-</option>{(cust(form.customerId)?.projects||[]).map(p=><option key={p}>{p}</option>)}</TS>
-            <TS label="Warehouse" value={form.warehouseCode} onChange={e=>setForm(f=>({...f,warehouseCode:e.target.value}))}><option value="">Select...</option>{warehouses.filter(w=>w.active).map(w=><option key={w.id} value={w.code}>{w.code}</option>)}</TS>
+            <TS label="Customer *" value={form.customerId} onChange={e=>setForm(f=>({...f,customerId:e.target.value,project:"",warehouseCode:"",containerNo:"",sku:"",description:"",plts:"",units:"",ledgerId:""}))}><option value="">Select...</option>{customers.filter(c=>c.status==="Active").map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</TS>
+            {multiMode?(
+              <>
+                <TS label="Project" value={form.project} onChange={e=>setForm(f=>({...f,project:e.target.value}))}><option value="">- from inventory -</option>{(cust(form.customerId)?.projects||[]).map(p=><option key={p}>{p}</option>)}</TS>
+                <TI label="Warehouse" value="from inventory" readOnly style={{opacity:0.7,cursor:"not-allowed"}}/>
+              </>
+            ):(
+              <>
+                <TI label="Project" value={form.project||""} readOnly placeholder="— from inventory —" style={{opacity:0.7,cursor:"not-allowed"}}/>
+                <TI label="Warehouse" value={form.warehouseCode||""} readOnly placeholder="— from inventory —" style={{opacity:0.7,cursor:"not-allowed"}}/>
+              </>
+            )}
           </div>
           {form.customerId&&availLedger.length>0&&(
             <div style={{marginBottom:14,display:"flex",gap:8,alignItems:"center"}}>
@@ -1094,13 +1131,20 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
             </div>
           )}
 
+          {!multiMode&&form.customerId&&availLedger.length===0&&(
+            <div style={{background:C.redD,border:`1px solid ${C.red}44`,borderRadius:6,padding:"10px 14px",marginBottom:14,fontSize:12.5,color:C.red}}>
+              This customer has no inventory on hand. An outbound order must ship from received inventory — receive an inbound order first.
+            </div>
+          )}
+
           {!multiMode&&form.customerId&&availLedger.length>0&&(
             <div style={{marginBottom:16}}>
-              <label style={s.label}>Ship From Inventory (optional - auto-deducts on ship)</label>
-              <select value={form.ledgerId} onChange={e=>{const l=ledger.find(x=>x.id===e.target.value);if(l){const b=balOf(l);const fc=(l.loadingType||"").toLowerCase().includes("full container");setForm(f=>({...f,ledgerId:l.id,containerNo:l.containerNo,sku:l.sku,description:l.description,warehouseCode:l.warehouseCode,plts:fc?b.plts:f.plts,units:fc?b.units:f.units}));}else{setForm(f=>({...f,ledgerId:""}));}}} style={s.input}>
-                <option value="">- manual entry -</option>
+              <label style={s.label}>Ship From Inventory *</label>
+              <select value={form.ledgerId} onChange={e=>{const l=ledger.find(x=>x.id===e.target.value);if(l){const b=balOf(l);const fc=(l.loadingType||"").toLowerCase().includes("full container");setForm(f=>({...f,ledgerId:l.id,containerNo:l.containerNo,sku:l.sku,description:l.description,warehouseCode:l.warehouseCode,project:l.project||"",plts:fc?b.plts:f.plts,units:fc?b.units:f.units}));}else{setForm(f=>({...f,ledgerId:"",containerNo:"",sku:"",description:"",warehouseCode:"",project:""}));}}} style={s.input}>
+                <option value="">- select inventory item -</option>
                 {availLedger.map(l=>{const b=balOf(l);const fc=(l.loadingType||"").toLowerCase().includes("full container");return <option key={l.id} value={l.id}>{l.containerNo} | {l.sku} | bal {b.plts}plt / {num(b.units)}u{fc?" | FULL CONTAINER":""}</option>;})}
               </select>
+              <div style={{fontSize:11,color:C.muted,marginTop:5}}>Required. Stock is deducted from this item when the order ships.</div>
             </div>
           )}
           {!multiMode&&form.ledgerId&&(()=>{const l=ledger.find(x=>x.id===form.ledgerId);if(!l)return null;const b=balOf(l);const fc=(l.loadingType||"").toLowerCase().includes("full container");return(
@@ -1110,9 +1154,9 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
           );})()}
           {!multiMode&&(()=>{const fcLock=(()=>{const l=ledger.find(x=>x.id===form.ledgerId);return l&&(l.loadingType||"").toLowerCase().includes("full container");})();return(
           <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12,marginBottom:16}}>
-            <TI label="Container / Order # *" value={form.containerNo} onChange={e=>setForm(f=>({...f,containerNo:e.target.value}))}/>
-            <TI label="SKU" value={form.sku} onChange={e=>setForm(f=>({...f,sku:e.target.value}))}/>
-            <TI label="Description" value={form.description} onChange={e=>setForm(f=>({...f,description:e.target.value}))}/>
+            <TI label="Container / Order #" value={form.containerNo} readOnly style={{opacity:0.7,cursor:"not-allowed"}}/>
+            <TI label="SKU" value={form.sku} readOnly style={{opacity:0.7,cursor:"not-allowed"}}/>
+            <TI label="Description" value={form.description} readOnly style={{opacity:0.7,cursor:"not-allowed"}}/>
             <TI label="ETD *" type="date" value={form.etd} onChange={e=>setForm(f=>({...f,etd:e.target.value}))}/>
             <TI label={fcLock?"Pallets * (full container)":"Pallets *"} type="number" value={form.plts} readOnly={fcLock} onChange={e=>fcLock?null:setForm(f=>({...f,plts:e.target.value}))} style={fcLock?{opacity:0.6,cursor:"not-allowed"}:{}}/>
             <TI label={fcLock?"Units * (full container)":"Units *"} type="number" value={form.units} readOnly={fcLock} onChange={e=>fcLock?null:setForm(f=>({...f,units:e.target.value}))} style={fcLock?{opacity:0.6,cursor:"not-allowed"}:{}}/>
@@ -1179,7 +1223,7 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
             <TI label="Ship Date" type="date" value={shipDate} onChange={e=>setShipDate(e.target.value)} autoFocus/>
             <div style={{fontSize:11,color:C.muted,marginTop:6}}>Defaults to today. This is the date the outbound leaves and is recorded in inventory movements.</div>
           </div>
-          <div style={{display:"flex",gap:8}}><Btn v="success" onClick={()=>{shipOrder(shipModal,shipDate);setShipModal(null);}}>Confirm Ship</Btn><Btn onClick={()=>setShipModal(null)}>Cancel</Btn></div>
+          <div style={{display:"flex",gap:8}}><Btn v="success" onClick={()=>{if(shipOrder(shipModal,shipDate))setShipModal(null);}}>Confirm Ship</Btn><Btn onClick={()=>setShipModal(null)}>Cancel</Btn></div>
         </Modal>
       )}
 
@@ -1285,7 +1329,7 @@ function InventoryLedger({ledger,customers,warehouses}){
   const[balanceOnly,setBalanceOnly]=useState(false);
   const cust=(id)=>customers.find(c=>c.id===id);
 
-  const balOf=(l)=>{const o=l.movements.reduce((a,m)=>({p:a.p+(m.outPlts||0),u:a.u+(m.outUnits||0)}),{p:0,u:0});return {plts:l.inPlts-o.p,units:l.inUnits-o.u};};
+  const balOf=(l)=>{const o=(l.movements||[]).reduce((a,m)=>({p:a.p+(m.outPlts||0),u:a.u+(m.outUnits||0)}),{p:0,u:0});return {plts:l.inPlts-o.p,units:l.inUnits-o.u};};
 
   const filtered=ledger.filter(l=>
     (!filterWh||l.warehouseCode===filterWh)&&
@@ -1337,7 +1381,7 @@ function InventoryLedger({ledger,customers,warehouses}){
                 Object.keys(groups[ck]).map(wk=>(
                   groups[ck][wk].map((l,li)=>{
                     const b=balOf(l);
-                    const totalOut=l.movements.reduce((a,m)=>({p:a.p+(m.outPlts||0),u:a.u+(m.outUnits||0)}),{p:0,u:0});
+                    const totalOut=(l.movements||[]).reduce((a,m)=>({p:a.p+(m.outPlts||0),u:a.u+(m.outUnits||0)}),{p:0,u:0});
                     return(
                       <React.Fragment key={l.id}>
                         <tr style={{background:C.input+"55",borderTop:`2px solid ${C.border}`}}>
@@ -1357,9 +1401,9 @@ function InventoryLedger({ledger,customers,warehouses}){
                           <td style={{...s.td,fontWeight:800,color:C.amber}}>{b.plts}</td>
                           <td style={{...s.td,fontWeight:800,color:C.amber}}>{num(b.units)}</td>
                         </tr>
-                        {!balanceOnly&&l.movements.map((m,mi)=>{
+                        {!balanceOnly&&(l.movements||[]).map((m,mi)=>{
                           // running balance after this movement
-                          const upto=l.movements.slice(0,mi+1).reduce((a,x)=>({p:a.p+(x.outPlts||0),u:a.u+(x.outUnits||0)}),{p:0,u:0});
+                          const upto=(l.movements||[]).slice(0,mi+1).reduce((a,x)=>({p:a.p+(x.outPlts||0),u:a.u+(x.outUnits||0)}),{p:0,u:0});
                           return(
                             <tr key={l.id+"_m"+mi} style={{background:"transparent"}}>
                               <td style={s.td}></td><td style={s.td}></td><td style={s.td}></td>
@@ -2200,7 +2244,7 @@ function BillingModule({orders,ledger,customers,invoices,setInvoices,isAdmin,log
 function CustomerPortal({customer,ledger,orders}){
   const[tab,setTab]=useState("inventory");
   const[search,setSearch]=useState("");
-  const balOf=(l)=>{const o=l.movements.reduce((a,m)=>({p:a.p+(m.outPlts||0),u:a.u+(m.outUnits||0)}),{p:0,u:0});return {plts:l.inPlts-o.p,units:l.inUnits-o.u};};
+  const balOf=(l)=>{const o=(l.movements||[]).reduce((a,m)=>({p:a.p+(m.outPlts||0),u:a.u+(m.outUnits||0)}),{p:0,u:0});return {plts:l.inPlts-o.p,units:l.inUnits-o.u};};
   const myLedger=ledger.filter(l=>l.customerId===customer.id);
   const myIn=orders.filter(o=>o.customerId===customer.id&&o.type==="IN");
   const myOut=orders.filter(o=>o.customerId===customer.id&&o.type==="OUT");
@@ -2316,6 +2360,7 @@ function CustomerPortal({customer,ledger,orders}){
 function Login({onStaff,onCustomer,customers,users,adminPass}){
   const[u,setU]=useState("");
   const[p,setP]=useState("");
+  const[showPw,setShowPw]=useState(false);
   const[err,setErr]=useState("");
   const submit=()=>{
     // admin
@@ -2337,7 +2382,22 @@ function Login({onStaff,onCustomer,customers,users,adminPass}){
         </div>
         <div style={{display:"flex",flexDirection:"column",gap:14,marginBottom:18}}>
           <TI id="login-username" label="Username" value={u} onChange={e=>setU(e.target.value)} onKeyDown={e=>e.key==="Enter"&&submit()} autoComplete="username"/>
-          <TI id="login-password" label="Password" type="password" value={p} onChange={e=>setP(e.target.value)} onKeyDown={e=>e.key==="Enter"&&submit()} autoComplete="current-password"/>
+          <div style={{display:"flex",flexDirection:"column"}}>
+            <label htmlFor="login-password" style={s.label}>Password</label>
+            <div style={{position:"relative"}}>
+              <input id="login-password" type={showPw?"text":"password"} value={p}
+                onChange={e=>setP(e.target.value)} onKeyDown={e=>e.key==="Enter"&&submit()}
+                autoComplete="current-password"
+                style={{...s.input,position:"relative",zIndex:1,paddingRight:70}}/>
+              <button type="button" onClick={()=>setShowPw(v=>!v)}
+                aria-label={showPw?"Hide password":"Show password"}
+                style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",zIndex:2,
+                  background:"none",border:"none",cursor:"pointer",color:showPw?C.amber:C.muted,
+                  fontSize:11,fontWeight:700,letterSpacing:"0.04em",padding:"4px 6px"}}>
+                {showPw?"HIDE":"SHOW"}
+              </button>
+            </div>
+          </div>
           {err&&<div style={{background:C.redD,border:`1px solid ${C.red}44`,borderRadius:6,padding:"8px 12px",fontSize:12,color:C.red}}>{err}</div>}
         </div>
         <Btn v="primary" onClick={submit} style={{width:"100%"}}>Sign In</Btn>
@@ -2354,7 +2414,7 @@ function Login({onStaff,onCustomer,customers,users,adminPass}){
 // ============================================================
 function Dashboard({orders,ledger,customers,invoices,activity,warehouses,setTab}){
   const cust=(id)=>customers.find(c=>c.id===id);
-  const balOf=(l)=>{const o=l.movements.reduce((a,m)=>({p:a.p+(m.outPlts||0),u:a.u+(m.outUnits||0)}),{p:0,u:0});return {plts:l.inPlts-o.p,units:l.inUnits-o.u};};
+  const balOf=(l)=>{const o=(l.movements||[]).reduce((a,m)=>({p:a.p+(m.outPlts||0),u:a.u+(m.outUnits||0)}),{p:0,u:0});return {plts:l.inPlts-o.p,units:l.inUnits-o.u};};
 
   // Operations metrics
   const inbound=orders.filter(o=>o.type==="IN"&&o.status!=="Received"&&o.status!=="Cancelled");
@@ -2668,9 +2728,10 @@ function WMSApp({initial, onSave, cloudStatus, onReload}){
 // on first run, and saves changes back (debounced per collection).
 // ============================================================
 const DEFAULTS = {
-  orders: INIT_ORDERS, ledger: INIT_LEDGER, customers: INIT_CUSTOMERS,
-  warehouses: INIT_WAREHOUSES, carriers: INIT_CARRIERS, users: INIT_USERS,
-  activity: INIT_ACTIVITY, invoices: INIT_INVOICES, templates: [],
+  orders: [], ledger: [], customers: [],
+  warehouses: [], carriers: [],
+  users: [{id:"U-MARIE",username:"Marie",password:"11861186",name:"Marie",role:"admin",active:true,permissions:{},allowedWarehouses:[]}],
+  activity: [], invoices: [], templates: [],
 };
 
 export default function App(){
@@ -2678,6 +2739,31 @@ export default function App(){
   const [status, setStatus] = useState("idle");     // idle | saving | error
   const [loadError, setLoadError] = useState(null);
   const saveTimers = useRef({});
+
+  // Dark-theme styling for native date pickers (calendar popup + icon).
+  // Injected here so it applies even if index.html isn't updated.
+  useEffect(() => {
+    const id="t2-datepicker-style";
+    if(document.getElementById(id))return;
+    const el=document.createElement("style");
+    el.id=id;
+    el.textContent=`
+      input[type="date"],input[type="datetime-local"],input[type="month"],input[type="time"]{color-scheme:dark;color:#e2eaf4;}
+      input[type="date"]::-webkit-calendar-picker-indicator,
+      input[type="datetime-local"]::-webkit-calendar-picker-indicator,
+      input[type="month"]::-webkit-calendar-picker-indicator,
+      input[type="time"]::-webkit-calendar-picker-indicator{
+        filter:invert(70%) sepia(85%) saturate(1400%) hue-rotate(2deg) brightness(103%) contrast(96%);
+        opacity:1;cursor:pointer;padding:2px;border-radius:3px;
+      }
+      input[type="date"]::-webkit-calendar-picker-indicator:hover{background:rgba(245,158,11,0.18);}
+      input[type="date"]::-webkit-datetime-edit-text,
+      input[type="date"]::-webkit-datetime-edit-month-field,
+      input[type="date"]::-webkit-datetime-edit-day-field,
+      input[type="date"]::-webkit-datetime-edit-year-field{color:#e2eaf4;}
+    `;
+    document.head.appendChild(el);
+  }, []);
 
   const boot = async () => {
     setInitial(null); setLoadError(null);
