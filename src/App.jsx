@@ -36,7 +36,12 @@ const dayAfter=(s)=>{ const d=new Date(s+"T12:00:00"); d.setDate(d.getDate()+1);
 const todayStr=()=>today.toISOString().split("T")[0];
 const money=(n)=>"$"+Number(n||0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g,",");
 const num=(n)=>Number(n||0).toLocaleString("en-US");
-let _id=1000; const uid=()=>String(++_id);
+// Globally-unique id. The old version reset a counter to 1000 on every page
+// load, so a new record could collide with an id already saved from a previous
+// session — causing React to render the wrong row (wrong receive, wrong
+// inventory pick). Timestamp + counter + randomness guarantees no collisions.
+let _id=Math.floor(Math.random()*1e6);
+const uid=()=>(Date.now().toString(36)+"-"+(++_id).toString(36)+"-"+Math.random().toString(36).slice(2,7));
 
 // -- Constants ----------------------------------------------
 const CONTAINER_TYPES=["40HQ","40GP","20GP","45HQ","53FT","Loose Cargo","LCL","Other"];
@@ -2836,21 +2841,47 @@ export default function App(){
     }
     const data = {};
     let seededAny = false;
+    const repaired = [];   // collections whose duplicate ids we fixed
     for (const key of COLLECTIONS) {
       if (res.data[key] === undefined) {
         data[key] = DEFAULTS[key];        // never saved before → seed defaults
         seededAny = true;
       } else {
-        data[key] = res.data[key];
+        let rows = res.data[key];
+        // Self-heal any duplicate ids left over from the old id generator, which
+        // could make React render the wrong row. Remap orders' ledger links too.
+        if (Array.isArray(rows)) {
+          const seen = new Set();
+          let dup = false;
+          const remap = {};   // oldDuplicateId (in this pass) -> newId, for ledger only
+          rows = rows.map((r) => {
+            if (!r || r.id == null) return r;
+            if (seen.has(r.id)) {
+              dup = true;
+              const nid = Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 9);
+              if (key === "ledger") remap[r.id] = nid;
+              return { ...r, id: nid };
+            }
+            seen.add(r.id);
+            return r;
+          });
+          if (dup) repaired.push(key);
+          data[key] = rows;
+          data.__remap = { ...(data.__remap || {}), ...(key === "ledger" ? remap : {}) };
+        } else {
+          data[key] = rows;
+        }
       }
     }
+    delete data.__remap;   // internal only; not a real collection
     setInitial(data);
-    // Persist any freshly-seeded collections so the DB has a starting point.
     if (seededAny) {
       for (const key of COLLECTIONS) {
         if (res.data[key] === undefined) saveCollection(key, data[key]);
       }
     }
+    // Persist any collections we de-duplicated so the fix is permanent.
+    repaired.forEach((key) => saveCollection(key, data[key]));
   };
 
   useEffect(() => { boot(); }, []);
