@@ -1352,6 +1352,13 @@ function InventoryLedger({ledger,setLedger,orders=[],customers,warehouses,isAdmi
     setLedger(p=>p.filter(x=>x.id!==l.id));
     logActivity&&logActivity("Inventory orphan removed",l.containerNo+" / "+l.sku,l.customerId,l.warehouseCode);
   };
+  const removeAllOrphans=()=>{
+    if(orphans.length===0)return;
+    if(!window.confirm(`Delete ALL ${orphans.length} orphaned inventory lines?\n\nThese are inventory rows that no inbound order points at. This cannot be undone.`))return;
+    const ids=new Set(orphans.map(o=>o.id));
+    setLedger(p=>p.filter(x=>!ids.has(x.id)));
+    logActivity&&logActivity("Inventory orphans cleared",orphans.length+" lines removed","","");
+  };
 
   const filtered=ledger.filter(l=>
     (!filterWh||l.warehouseCode===filterWh)&&
@@ -1386,7 +1393,10 @@ function InventoryLedger({ledger,setLedger,orders=[],customers,warehouses,isAdmi
 
       {mayFull&&orphans.length>0&&(
         <div style={{background:C.redD,border:`1px solid ${C.red}44`,borderRadius:8,padding:"14px 16px"}}>
-          <div style={{fontWeight:800,color:C.red,fontSize:13,marginBottom:6}}>⚠ {orphans.length} orphaned inventory line{orphans.length>1?"s":""}</div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+            <div style={{fontWeight:800,color:C.red,fontSize:13}}>⚠ {orphans.length} orphaned inventory line{orphans.length>1?"s":""}</div>
+            <Btn sm v="danger" onClick={removeAllOrphans}>Delete All ({orphans.length})</Btn>
+          </div>
           <div style={{fontSize:12,color:C.muted,marginBottom:10}}>
             No inbound order points at {orphans.length>1?"these lines":"this line"}, so {orphans.length>1?"they are":"it is"} inflating your on-hand stock.
             This came from data created before the undo-receive fix. Review and remove.
