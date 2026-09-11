@@ -1975,6 +1975,7 @@ function BillingModule({orders,ledger,customers,invoices,setInvoices,isAdmin,per
   const[sel,setSel]=useState({}); // chargeId -> true
   const[preview,setPreview]=useState(null); // invoice being previewed/created
   const[viewInv,setViewInv]=useState(null);
+  const[billThrough,setBillThrough]=useState(today.toISOString().split("T")[0]); // storage bill-through date for open segments
   const cust=(id)=>customers.find(c=>c.id===id);
 
   // active rate card for a customer at a given date
@@ -1995,7 +1996,17 @@ function BillingModule({orders,ledger,customers,invoices,setInvoices,isAdmin,per
 
   // Build list of chargeable items not yet invoiced
   const billedKeys=new Set();
-  invoices.forEach(inv=>inv.lines.forEach(l=>billedKeys.add(l.key)));
+  // Track, per ledger id, the latest date storage has already been billed through,
+  // so a re-bill of the still-open inventory starts the day AFTER that (no overlap).
+  const lastStorageBilled={};
+  invoices.forEach(inv=>inv.lines.forEach(l=>{
+    billedKeys.add(l.key);
+    if(l.key&&l.key.startsWith("STR-")&&l.storageThrough){
+      const m=l.key.match(/^STR-(.+?)-(?:open|seg)/);
+      const lid=m?m[1]:null;
+      if(lid&&(!lastStorageBilled[lid]||l.storageThrough>lastStorageBilled[lid]))lastStorageBilled[lid]=l.storageThrough;
+    }
+  }));
 
   const charges=[];
   // 1a. Unloading / forklift — ONE charge per received container (not per SKU line).
@@ -2061,28 +2072,36 @@ function BillingModule({orders,ledger,customers,invoices,setInvoices,isAdmin,per
       segStart=dayAfter(m.date); // next segment starts the day AFTER the outbound
       first=false;
     });
-    // final open segment (remaining inventory, up to today)
+    // final open segment (remaining inventory, up to the chosen bill-through date).
+    // If storage was already partially billed, start the day after the last billed date.
     if(curPlts>0||curUnits>0||segs.length===0){
-      segs.push({start:segStart,end:todayStr(),plts:curPlts,units:curUnits,free:first?freeDays:0,open:true});
+      let openStart=segStart;
+      const lb=lastStorageBilled[l.id];
+      if(lb&&dayAfter(lb)>openStart)openStart=dayAfter(lb);
+      segs.push({start:openStart,end:billThrough,plts:curPlts,units:curUnits,free:first&&!lb?freeDays:0,open:true});
     }
 
     segs.forEach((seg,idx)=>{
+      // Don't bill a segment whose start is after its end (e.g. bill-through earlier than segment start)
+      if(seg.start>seg.end)return;
       const rawDays=daysInclusive(seg.start,seg.end);
       const days=Math.max(0,rawDays-(seg.free||0));
       if(days<=0)return;
       let amount,desc,qty,rate;
       if(isFullContainer){
         qty=1; rate=perDayRate*days; amount=perDayRate*days;
-        desc=`Container storage ${l.containerNo} — ${days}d (${fmtD(seg.start)}–${fmtD(seg.end)})${seg.free?` after ${seg.free}d free`:""}`;
+        desc=`Container storage ${l.containerNo} — ${days}d (${fmtD(seg.start)}–${fmtD(seg.end)})${seg.free?` after ${seg.free}d free`:""}${seg.open?" [partial]":""}`;
       } else {
         if(seg.plts<=0)return;
         qty=seg.plts; rate=perDayRate*days; amount=seg.plts*perDayRate*days;
-        desc=`Storage ${l.sku} — ${seg.plts} plt × ${days}d (${fmtD(seg.start)}–${fmtD(seg.end)})${seg.free?` after ${seg.free}d free`:""}`;
+        desc=`Storage ${l.sku} — ${seg.plts} plt × ${days}d (${fmtD(seg.start)}–${fmtD(seg.end)})${seg.free?` after ${seg.free}d free`:""}${seg.open?" [partial]":""}`;
       }
       if(amount<=0)return;
-      // closed segments have stable keys; the open segment re-bills until invoiced
-      const key=`STR-${l.id}-seg${idx}`;
-      if(!billedKeys.has(key))charges.push({key,customerId:l.customerId,group:"Storage",date:seg.end,container:l.containerNo,desc,qty,rate,amount});
+      // Closed segments have stable keys. The open segment's key includes the bill-through
+      // date, so after invoicing one range you can bill a later range (next segment starts
+      // the day after the last billed date — see below).
+      const key=seg.open?`STR-${l.id}-open-${billThrough}`:`STR-${l.id}-seg${idx}`;
+      if(!billedKeys.has(key))charges.push({key,customerId:l.customerId,group:"Storage",date:seg.end,container:l.containerNo,desc,qty,rate,amount,storageThrough:seg.end});
     });
   });
   // 3. Outbound handling/shipping from shipped orders
@@ -2130,7 +2149,7 @@ function BillingModule({orders,ledger,customers,invoices,setInvoices,isAdmin,per
     selectedCharges.forEach(c=>{(byCust[c.customerId]=byCust[c.customerId]||[]).push(c);});
     const newInvoices=Object.keys(byCust).map(cid=>{
       const c=cust(cid);
-      const lines=byCust[cid].map(x=>({key:x.key,group:x.group,desc:x.desc,qty:x.qty,rate:x.rate,amount:x.amount}));
+      const lines=byCust[cid].map(x=>({key:x.key,group:x.group,desc:x.desc,qty:x.qty,rate:x.rate,amount:x.amount,container:x.container||"",storageThrough:x.storageThrough||""}));
       const subtotal=lines.reduce((a,l)=>a+l.amount,0);
       const issue=today.toISOString().split("T")[0];
       const due=dFwd(termDays(c?.billingTerms));
@@ -2145,9 +2164,10 @@ function BillingModule({orders,ledger,customers,invoices,setInvoices,isAdmin,per
   const delInvoice=(id)=>{ if(window.confirm("Delete invoice "+id+"? Charges become billable again."))setInvoices(p=>p.filter(i=>i.id!==id)); };
   const printInvoice=(inv)=>{
     const c=cust(inv.customerId);
-    const rows=inv.lines.map(l=>`<tr><td style="padding:6px 10px;border-bottom:1px solid #ddd">${l.group}</td><td style="padding:6px 10px;border-bottom:1px solid #ddd">${l.desc}</td><td style="padding:6px 10px;border-bottom:1px solid #ddd;text-align:right">${money(l.amount)}</td></tr>`).join("");
+    const rows=inv.lines.map(l=>`<tr><td style="padding:6px 10px;border-bottom:1px solid #ddd">${l.group}</td><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-family:monospace">${l.container||"-"}</td><td style="padding:6px 10px;border-bottom:1px solid #ddd">${l.desc}</td><td style="padding:6px 10px;border-bottom:1px solid #ddd;text-align:right">${money(l.amount)}</td></tr>`).join("");
+    const conts=[...new Set((inv.lines||[]).map(l=>l.container).filter(Boolean))];
     const w=window.open("","_blank");
-    if(w){w.document.write(`<div style="font-family:Arial;padding:40px;max-width:700px"><h1 style="color:#b8860b">INVOICE ${inv.id}</h1><p><b>${c?.name||""}</b><br>${c?.address||""}<br>${c?.email||""}</p><p>Issued: ${fmtD(inv.issueDate)} · Due: ${fmtD(inv.dueDate)} · Terms: ${inv.terms}</p><table style="width:100%;border-collapse:collapse;margin-top:20px"><tr style="background:#f0f0f0"><th style="padding:8px 10px;text-align:left">Type</th><th style="padding:8px 10px;text-align:left">Description</th><th style="padding:8px 10px;text-align:right">Amount</th></tr>${rows}<tr><td colspan="2" style="padding:10px;text-align:right;font-weight:bold;font-size:18px">TOTAL</td><td style="padding:10px;text-align:right;font-weight:bold;font-size:18px">${money(inv.total)}</td></tr></table></div>`);setTimeout(()=>w.print&&w.print(),300);}
+    if(w){w.document.write(`<div style="font-family:Arial;padding:40px;max-width:750px"><h1 style="color:#b8860b">INVOICE ${inv.id}</h1><p><b>${c?.name||""}</b><br>${c?.address||""}<br>${c?.email||""}</p><p>Issued: ${fmtD(inv.issueDate)} · Due: ${fmtD(inv.dueDate)} · Terms: ${inv.terms}</p>${conts.length?`<p style="font-size:13px;color:#555"><b>Container(s):</b> ${conts.join(", ")}</p>`:""}<table style="width:100%;border-collapse:collapse;margin-top:20px"><tr style="background:#f0f0f0"><th style="padding:8px 10px;text-align:left">Type</th><th style="padding:8px 10px;text-align:left">Container</th><th style="padding:8px 10px;text-align:left">Description</th><th style="padding:8px 10px;text-align:right">Amount</th></tr>${rows}<tr><td colspan="3" style="padding:10px;text-align:right;font-weight:bold;font-size:18px">TOTAL</td><td style="padding:10px;text-align:right;font-weight:bold;font-size:18px">${money(inv.total)}</td></tr></table></div>`);setTimeout(()=>w.print&&w.print(),300);}
   };
 
   const GROUP_COLOR={Receiving:"blue",Transload:"purple",Storage:"amber",Outbound:"orange",Service:"teal"};
@@ -2180,6 +2200,10 @@ function BillingModule({orders,ledger,customers,invoices,setInvoices,isAdmin,per
               <div style={{fontSize:12,color:C.muted,marginTop:2}}>Auto-derived from receiving, storage aging &amp; shipments</div>
             </div>
             <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+              <div style={{display:"flex",alignItems:"center",gap:6,background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,padding:"4px 10px"}}>
+                <span style={{fontSize:11,color:C.muted,fontWeight:700}}>Storage bill-through</span>
+                <input type="date" value={billThrough} onChange={e=>{setBillThrough(e.target.value);setSel({});}} style={{...s.input,width:150,padding:"5px 8px"}}/>
+              </div>
               <select value={filterCust} onChange={e=>{setFilterCust(e.target.value);setSel({});}} style={{...s.input,width:150}}><option value="">All Customers</option>{customers.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select>
               <input value={searchC} onChange={e=>setSearchC(e.target.value)} placeholder="Search container #" style={{...s.input,width:170}}/>
               <Btn sm v="ghost" onClick={()=>exportExcel("unbilled_charges.xls","Unbilled",filtered.map(c=>({Type:c.group,Date:c.date,Customer:cust(c.customerId)?.name,Container:c.container,Description:c.desc,Qty:c.qty,Rate:c.rate,Amount:c.amount})))} style={{color:C.green,borderColor:C.green+"55"}}>Excel</Btn>
@@ -2219,17 +2243,18 @@ function BillingModule({orders,ledger,customers,invoices,setInvoices,isAdmin,per
             <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
               <select value={filterCust} onChange={e=>setFilterCust(e.target.value)} style={{...s.input,width:150}}><option value="">All Customers</option>{customers.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select>
               <input value={searchC} onChange={e=>setSearchC(e.target.value)} placeholder="Search container / invoice #" style={{...s.input,width:190}}/>
-              <Btn sm v="ghost" onClick={()=>exportExcel("invoices.xls","Invoices",invFiltered.map(i=>({Invoice:i.id,Customer:cust(i.customerId)?.name,Issued:i.issueDate,Due:i.dueDate,Terms:i.terms,Lines:i.lines.length,Total:i.total,Status:i.status})))} style={{color:C.green,borderColor:C.green+"55"}}>Export Excel</Btn>
+              <Btn sm v="ghost" onClick={()=>exportExcel("invoices.xls","Invoices",invFiltered.map(i=>({Invoice:i.id,Customer:cust(i.customerId)?.name,Containers:[...new Set((i.lines||[]).map(l=>l.container).filter(Boolean))].join(", "),Issued:i.issueDate,Due:i.dueDate,Terms:i.terms,Lines:i.lines.length,Total:i.total,Status:i.status})))} style={{color:C.green,borderColor:C.green+"55"}}>Export Excel</Btn>
             </div>
           </div>
           <div style={{overflowX:"auto"}}>
             <table style={{width:"100%",borderCollapse:"collapse",minWidth:900}}>
-              <thead><tr style={{background:C.bg}}>{["Invoice #","Customer","Issued","Due","Terms","Lines","Total","Status","Actions"].map(h=><th key={h} style={s.th}>{h}</th>)}</tr></thead>
+              <thead><tr style={{background:C.bg}}>{["Invoice #","Customer","Containers","Issued","Due","Terms","Lines","Total","Status","Actions"].map(h=><th key={h} style={s.th}>{h}</th>)}</tr></thead>
               <tbody>
-                {invFiltered.map((inv,i)=>(
+                {invFiltered.map((inv,i)=>{const invConts=[...new Set((inv.lines||[]).map(l=>l.container).filter(Boolean))];return(
                   <tr key={inv.id} style={{background:i%2?C.bg+"66":"transparent"}}>
                     <td style={{...s.td,fontFamily:"monospace",color:C.amber,fontWeight:700}}>{inv.id}</td>
                     <td style={{...s.td,fontWeight:700}}>{cust(inv.customerId)?.name}</td>
+                    <td style={{...s.td,fontSize:11,fontFamily:"monospace",color:C.teal,maxWidth:180}}>{invConts.length?invConts.join(", "):"-"}</td>
                     <td style={{...s.td,fontSize:11,color:C.muted}}>{fmtD(inv.issueDate)}</td>
                     <td style={{...s.td,fontSize:11,color:C.muted}}>{fmtD(inv.dueDate)}</td>
                     <td style={{...s.td,fontSize:11}}>{inv.terms}</td>
@@ -2245,7 +2270,7 @@ function BillingModule({orders,ledger,customers,invoices,setInvoices,isAdmin,per
                       </div>
                     </td>
                   </tr>
-                ))}
+                );})}
               </tbody>
             </table>
             {invoices.length===0&&<div style={{padding:"40px",textAlign:"center",color:C.muted}}>No invoices yet. Select charges in the Unbilled tab to create one.</div>}
@@ -2293,10 +2318,11 @@ function BillingModule({orders,ledger,customers,invoices,setInvoices,isAdmin,per
             </div>
           </div>
           <table style={{width:"100%",borderCollapse:"collapse",marginBottom:16}}>
-            <thead><tr style={{background:C.bg}}>{["Type","Description","Qty","Rate","Amount"].map(h=><th key={h} style={s.th}>{h}</th>)}</tr></thead>
+            <thead><tr style={{background:C.bg}}>{["Type","Container","Description","Qty","Rate","Amount"].map(h=><th key={h} style={s.th}>{h}</th>)}</tr></thead>
             <tbody>{viewInv.lines.map((l,i)=>(
               <tr key={i}>
                 <td style={s.td}><Tag label={l.group} color={GROUP_COLOR[l.group]||"slate"}/></td>
+                <td style={{...s.td,fontSize:11,fontFamily:"monospace",color:C.teal}}>{l.container||"-"}</td>
                 <td style={{...s.td,fontSize:12}}>{l.desc}</td>
                 <td style={{...s.td,color:C.muted}}>{l.qty}</td>
                 <td style={{...s.td,fontSize:11,color:C.muted}}>{money(l.rate)}</td>
