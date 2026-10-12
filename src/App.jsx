@@ -1388,6 +1388,14 @@ function InventoryLedger({ledger,setLedger,orders=[],customers,warehouses,isAdmi
     setLedger(p=>p.filter(x=>!ids.has(x.id)));
     logActivity&&logActivity("Inventory orphans cleared",orphans.length+" lines removed","","");
   };
+  // Delete one outbound movement from an inventory line (restores that stock).
+  // Used to remove a stray/duplicate "partial out" left by an older edit.
+  const removeMovement=(l,mi)=>{
+    const m=(l.movements||[])[mi]; if(!m)return;
+    if(!window.confirm(`Remove this outbound movement from ${l.containerNo} / ${l.sku}?\n\n${m.outPlts||0} plt / ${num(m.outUnits)} u on ${fmtD(m.date)} (ref ${m.ref||"-"}) will be added back to on-hand stock. This cannot be undone.`))return;
+    setLedger(p=>p.map(x=>x.id===l.id?{...x,movements:(x.movements||[]).filter((_,i)=>i!==mi)}:x));
+    logActivity&&logActivity("Inventory movement removed",l.containerNo+" / "+l.sku+" · "+(m.outPlts||0)+" plt / "+num(m.outUnits)+" u","",l.warehouseCode);
+  };
 
   const filtered=ledger.filter(l=>
     (!filterWh||l.warehouseCode===filterWh)&&
@@ -1487,7 +1495,7 @@ function InventoryLedger({ledger,setLedger,orders=[],customers,warehouses,isAdmi
                           return(
                             <tr key={l.id+"_m"+mi} style={{background:"transparent"}}>
                               <td style={s.td}></td><td style={s.td}></td><td style={s.td}></td>
-                              <td colSpan={4} style={{...s.td,fontSize:11,color:C.muted,paddingLeft:24}}>↳ partial out · ref {m.ref||"-"}</td>
+                              <td colSpan={4} style={{...s.td,fontSize:11,color:C.muted,paddingLeft:24}}>↳ partial out · ref {m.ref||"-"}{mayFull&&<span onClick={()=>removeMovement(l,mi)} title="Remove this movement (restores the stock)" style={{marginLeft:10,color:C.red,cursor:"pointer",fontWeight:700,border:`1px solid ${C.red}55`,borderRadius:4,padding:"1px 6px",fontSize:10}}>✕ remove</span>}</td>
                               <td style={s.td}></td><td style={s.td}></td><td style={s.td}></td>
                               <td style={{...s.td,fontSize:11,color:C.orange}}>{fmtD(m.date)}</td>
                               <td style={{...s.td,color:C.orange}}>{m.outPlts||0}</td>
