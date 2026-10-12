@@ -736,12 +736,19 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
     const plts=Number(form.plts||0);
     const units=Number(form.units||0);
     if(plts<=0&&units<=0){alert("Quantity cannot be 0. Enter pallets and/or units to ship.");return;}
-    // An already-shipped order's movement is already deducted from the balance,
-    // so only check availability for orders that haven't shipped yet.
-    if(form.status!=="Shipped"){
+    const editingShipped=modal!=="add"&&form.status==="Shipped";
+    if(!editingShipped){
+      // Not-yet-shipped order: check against the current balance.
       const b=balOf(src);
       if(plts>b.plts){alert(`Cannot process: ${plts} pallets exceeds available balance of ${b.plts} pallets for ${src.containerNo}.`);return;}
       if(units>b.units){alert(`Cannot process: ${num(units)} units exceeds available balance of ${num(b.units)} units for ${src.containerNo}.`);return;}
+    } else {
+      // Editing a shipped order: validate against balance EXCLUDING this order's own
+      // existing movement (so a correction up/down is checked correctly), then update
+      // that movement to the corrected quantity.
+      const bExcl=(()=>{const o2=(src.movements||[]).filter(m=>m.orderId!==form.id).reduce((a,m)=>({p:a.p+(m.outPlts||0),u:a.u+(m.outUnits||0)}),{p:0,u:0});return {plts:src.inPlts-o2.p,units:src.inUnits-o2.u};})();
+      if(plts>bExcl.plts){alert(`Cannot save: ${plts} pallets exceeds available balance of ${bExcl.plts} pallets for ${src.containerNo} (excluding this shipment).`);return;}
+      if(units>bExcl.units){alert(`Cannot save: ${num(units)} units exceeds available balance of ${num(bExcl.units)} units for ${src.containerNo} (excluding this shipment).`);return;}
     }
     // These always mirror the inbound/inventory record — never free text.
     const locked={
@@ -753,7 +760,27 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
       setOrders(p=>[o,...p]);
       logActivity("OUT order created",locked.containerNo,locked.customerId,locked.warehouseCode);
     } else {
-      setOrders(p=>p.map(o=>o.id===form.id?{...form,...locked,plts,units,mktShipFee:Number(form.mktShipFee||0),serviceLines:cleanLines}:o));
+      setOrders(p=>p.map(o=>{if(o.id!==form.id)return o;const{origPlts,origUnits,...clean}=form;return {...clean,...locked,plts,units,mktShipFee:Number(form.mktShipFee||0),serviceLines:cleanLines};}));
+      // If this is a shipped order, correct its inventory movement so stock matches.
+      if(editingShipped){
+        setLedger(p=>p.map(x=>{
+          if(x.id!==form.ledgerId)return x;
+          const movs=(x.movements||[]);
+          // Prefer matching by orderId; fall back to the legacy ref match for old data.
+          let matched=false;
+          let next=movs.map(m=>{
+            if(!matched&&(m.orderId===form.id||(m.orderId===undefined&&m.ref===(form.reference||form.containerNo)&&Number(m.outPlts||0)===Number(form.origPlts||0)&&Number(m.outUnits||0)===Number(form.origUnits||0)))){
+              matched=true;
+              return {...m,outPlts:plts,outUnits:units,orderId:form.id};
+            }
+            return m;
+          });
+          // If no movement was found (shouldn't happen), add one so stock stays consistent.
+          if(!matched)next=[...next,{date:form.shippedDate||today.toISOString().split("T")[0],outPlts:plts,outUnits:units,ref:form.reference||form.containerNo,orderId:form.id}];
+          return {...x,movements:next};
+        }));
+        logActivity("OUT qty corrected",locked.containerNo+" → "+plts+" plt / "+num(units)+" u",locked.customerId,locked.warehouseCode);
+      }
     }
     setModal(null);
   };
@@ -789,7 +816,7 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
       return false;
     }
     setOrders(p=>p.map(x=>x.id===o.id?{...x,status:"Shipped",shippedDate:sd,ledgerId:l.id}:x));
-    setLedger(p=>p.map(x=>x.id===l.id?{...x,movements:[...(x.movements||[]),{date:sd,outPlts:pp,outUnits:uu,ref:o.reference||o.containerNo}]}:x));
+    setLedger(p=>p.map(x=>x.id===l.id?{...x,movements:[...(x.movements||[]),{date:sd,outPlts:pp,outUnits:uu,ref:o.reference||o.containerNo,orderId:o.id}]}:x));
     logActivity("OUT shipped",o.containerNo,o.customerId,o.warehouseCode);
     return true;
   };
@@ -803,7 +830,9 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
         if(l.id!==o.ledgerId)return l;
         const movs=l.movements||[];
         const ref=o.reference||o.containerNo;
-        const idx=movs.map((m,i)=>({m,i})).reverse().find(x=>x.m.ref===ref&&Number(x.m.outUnits||0)===Number(o.units||0)&&Number(x.m.outPlts||0)===Number(o.plts||0));
+        // Prefer the exact movement tagged with this order's id; fall back to ref+qty for old data.
+        let idx=movs.map((m,i)=>({m,i})).reverse().find(x=>x.m.orderId===o.id);
+        if(!idx)idx=movs.map((m,i)=>({m,i})).reverse().find(x=>x.m.orderId===undefined&&x.m.ref===ref&&Number(x.m.outUnits||0)===Number(o.units||0)&&Number(x.m.outPlts||0)===Number(o.plts||0));
         if(!idx)return l;
         return {...l,movements:movs.filter((_,i)=>i!==idx.i)};
       }));
@@ -1071,7 +1100,7 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
                       {o.status==="Submitted"&&!isFreight&&<Tag label="Awaiting Freight Cost" color="orange"/>}
                       {o.status==="Scheduled"&&mayAdd&&<Btn sm v="success" onClick={()=>openShip(o)}>Ship</Btn>}
                       {o.status==="Scheduled"&&isFreight&&<Btn sm v="ghost" onClick={()=>openFreightConfirm(o)} style={{color:C.blue,borderColor:C.blue+"55"}}>Edit Freight</Btn>}
-                      {mayEdit&&!orderInvoiced(o)&&<Btn sm v="ghost" onClick={()=>{setForm(o);setModal("edit");}} style={{color:C.amber,borderColor:C.amber+"55"}}>Edit</Btn>}
+                      {mayEdit&&!orderInvoiced(o)&&<Btn sm v="ghost" onClick={()=>{setForm({...o,origPlts:o.plts,origUnits:o.units});setModal("edit");}} style={{color:C.amber,borderColor:C.amber+"55"}}>Edit</Btn>}
                       {mayAdd&&<Btn sm v="ghost" onClick={()=>duplicateOrder(o)} style={{color:C.blue,borderColor:C.blue+"55"}}>Duplicate</Btn>}
                       <Btn sm v="ghost" onClick={()=>printBOL(o)} style={{color:C.purple,borderColor:C.purple+"55"}}>BOL</Btn>
                       {mayFull&&o.status==="Shipped"&&!orderInvoiced(o)&&<Btn sm v="ghost" onClick={()=>unshipOrder(o)} style={{color:C.orange,borderColor:C.orange+"55"}}>Undo Ship</Btn>}
