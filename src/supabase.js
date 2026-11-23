@@ -26,6 +26,21 @@ export async function loadAll() {
   }
 }
 
+// Load a single key's value (used for the lightweight "who's online" presence
+// map, which is kept outside the main collections so heartbeats never disturb
+// the normal last-write-wins save flow). Returns {ok, value} — value is
+// undefined if the key has never been written.
+export async function loadOne(key) {
+  try {
+    const { data, error } = await supabase
+      .from("app_data").select("value").eq("key", key).maybeSingle();
+    if (error) throw error;
+    return { ok: true, value: data ? data.value : undefined };
+  } catch (e) {
+    return { ok: false, error: e?.message || String(e), value: undefined };
+  }
+}
+
 // Save one collection (the whole array) to the cloud.
 //
 // Last-write-wins: whatever the app currently holds becomes the stored copy.

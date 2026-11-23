@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { loadAll, saveCollection, COLLECTIONS } from "./supabase.js";
+import { loadAll, saveCollection, loadOne, COLLECTIONS } from "./supabase.js";
 
 // ============================================================
 // TRANSLOAD WMS v3 - DC Operations Portal
@@ -312,6 +312,19 @@ function CommentThread({comments,canAdd,onAdd}){
           <Btn sm v="primary" onClick={add}>Add</Btn>
         </div>
       )}
+    </div>
+  );
+}
+// Small "All / Active only" toggle shown on the Customers, Carriers,
+// Warehouses and Users list screens.
+function ActiveToggle({showAll,setShowAll}){
+  const tab=(on,label,val)=>(
+    <button onClick={()=>setShowAll(val)} style={{background:on?C.amber:"transparent",color:on?C.bg:C.muted,border:`1px solid ${on?C.amber:C.border}`,padding:"5px 12px",fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>{label}</button>
+  );
+  return(
+    <div style={{display:"inline-flex",borderRadius:6,overflow:"hidden"}}>
+      {tab(!showAll,"Active only",false)}
+      {tab(showAll,"All",true)}
     </div>
   );
 }
@@ -2156,6 +2169,8 @@ function CustomerMgmt({customers,setCustomers,isAdmin,perm="full"}){
   const mayFull=isAdmin||canDelete(perm);
   const[modal,setModal]=useState(null);
   const[rcModal,setRcModal]=useState(null);
+  const[showAll,setShowAll]=useState(true);
+  const shownCust=showAll?customers:customers.filter(c=>c.status==="Active");
   const empty={name:"",contact:"",email:"",phone:"",address:"",billingTerms:"Net 30",status:"Active",projects:[],portalUser:"",portalPass:"",quoteSheets:[]};
   const[form,setForm]=useState(empty);
   const[projInput,setProjInput]=useState("");
@@ -2180,7 +2195,8 @@ function CustomerMgmt({customers,setCustomers,isAdmin,perm="full"}){
           <div style={{fontSize:12,color:C.muted,marginTop:3}}>{customers.length} customers · contact info, projects &amp; rate cards</div>
         </div>
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
-          <Btn v="ghost" onClick={()=>exportExcel("customers.xls","Customers",customers.map(c=>({Customer_ID:c.id,Name:c.name,Contact:c.contact,Email:c.email,Phone:c.phone,Address:c.address,Projects:(c.projects||[]).join("; "),Terms:c.billingTerms,Portal_User:c.portalUser,Rate_Sheets:(c.quoteSheets||[]).length,Status:c.status})))} style={{color:C.green,borderColor:C.green+"55"}}>Export Excel</Btn>
+          <ActiveToggle showAll={showAll} setShowAll={setShowAll}/>
+          <Btn v="ghost" onClick={()=>exportExcel("customers.xls","Customers",shownCust.map(c=>({Customer_ID:c.id,Name:c.name,Contact:c.contact,Email:c.email,Phone:c.phone,Address:c.address,Projects:(c.projects||[]).join("; "),Terms:c.billingTerms,Portal_User:c.portalUser,Rate_Sheets:(c.quoteSheets||[]).length,Status:c.status})))} style={{color:C.green,borderColor:C.green+"55"}}>Export Excel</Btn>
           {mayAdd&&<Btn v="primary" onClick={()=>{setForm({...empty,customId:""});setModal("add");}}>+ Add Customer</Btn>}
         </div>
       </div>
@@ -2190,7 +2206,7 @@ function CustomerMgmt({customers,setCustomers,isAdmin,perm="full"}){
           <table style={{width:"100%",borderCollapse:"collapse",minWidth:1000}}>
             <thead><tr style={{background:C.bg}}>{["Customer ID","Name","Contact","Email","Phone","Address","Projects","Terms","Status","Actions"].map(h=><th key={h} style={s.th}>{h}</th>)}</tr></thead>
             <tbody>
-              {customers.map((c,i)=>(
+              {shownCust.map((c,i)=>(
                 <tr key={c.id} style={{background:i%2?C.bg+"66":"transparent"}}>
                   <td style={{...s.td,fontFamily:"monospace",color:C.amber,fontWeight:700}}>{c.id}</td>
                   <td style={{...s.td,fontWeight:700}}>{c.name}</td>
@@ -2211,6 +2227,7 @@ function CustomerMgmt({customers,setCustomers,isAdmin,perm="full"}){
               ))}
             </tbody>
           </table>
+          {shownCust.length===0&&<div style={{padding:"30px",textAlign:"center",color:C.muted}}>No {showAll?"":"active "}customers.</div>}
         </div>
       </div>
 
@@ -2368,7 +2385,9 @@ function CarrierMgmt({carriers,setCarriers,isAdmin,perm="full"}){
   const mayEdit=isAdmin||canEdit(perm);
   const mayFull=isAdmin||canDelete(perm);
   const[modal,setModal]=useState(null);
+  const[showAll,setShowAll]=useState(true);
   const[form,setForm]=useState({name:"",scac:"",contact:"",phone:"",active:true});
+  const shown=showAll?carriers:carriers.filter(c=>c.active!==false);
   const save=()=>{
     if(!form.name){alert("Carrier name is required.");return;}
     const name=form.name.trim();
@@ -2382,12 +2401,15 @@ function CarrierMgmt({carriers,setCarriers,isAdmin,perm="full"}){
     <div style={{display:"flex",flexDirection:"column",gap:18}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div><h2 style={{margin:0,fontSize:20,fontWeight:800,color:C.white}}>Carriers</h2><div style={{fontSize:12,color:C.muted,marginTop:3}}>Freight carriers used on outbound orders &amp; BOLs</div></div>
-        {mayAdd&&<Btn v="primary" onClick={()=>{setForm({name:"",scac:"",contact:"",phone:"",active:true});setModal("add");}}>+ Add Carrier</Btn>}
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <ActiveToggle showAll={showAll} setShowAll={setShowAll}/>
+          {mayAdd&&<Btn v="primary" onClick={()=>{setForm({name:"",scac:"",contact:"",phone:"",active:true});setModal("add");}}>+ Add Carrier</Btn>}
+        </div>
       </div>
       <div style={{...s.card,padding:0,overflow:"hidden"}}>
         <table style={{width:"100%",borderCollapse:"collapse"}}>
           <thead><tr style={{background:C.bg}}>{["Carrier","SCAC","Contact","Phone","Status","Actions"].map(h=><th key={h} style={s.th}>{h}</th>)}</tr></thead>
-          <tbody>{carriers.map((c,i)=>(
+          <tbody>{shown.map((c,i)=>(
             <tr key={c.id} style={{background:i%2?C.bg+"66":"transparent"}}>
               <td style={{...s.td,fontWeight:700}}>{c.name}</td>
               <td style={{...s.td,fontFamily:"monospace",color:C.teal}}>{c.scac||"-"}</td>
@@ -2398,6 +2420,7 @@ function CarrierMgmt({carriers,setCarriers,isAdmin,perm="full"}){
             </tr>
           ))}</tbody>
         </table>
+        {shown.length===0&&<div style={{padding:"30px",textAlign:"center",color:C.muted}}>No {showAll?"":"active "}carriers.</div>}
       </div>
       {modal&&(
         <Modal title={modal==="add"?"Add Carrier":"Edit Carrier"} onClose={()=>setModal(null)}>
@@ -2422,7 +2445,9 @@ function WarehouseMgmt({warehouses,setWarehouses,isAdmin,perm="full"}){
   const mayEdit=isAdmin||canEdit(perm);
   const mayFull=isAdmin||canDelete(perm);
   const[modal,setModal]=useState(null);
+  const[showAll,setShowAll]=useState(true);
   const[form,setForm]=useState({code:"",name:"",address:"",active:true});
+  const shown=showAll?warehouses:warehouses.filter(w=>w.active);
   const save=()=>{
     if(!form.code||!form.name)return;
     const code=form.code.trim();
@@ -2435,13 +2460,16 @@ function WarehouseMgmt({warehouses,setWarehouses,isAdmin,perm="full"}){
   return(
     <div style={{display:"flex",flexDirection:"column",gap:18}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-        <div><h2 style={{margin:0,fontSize:20,fontWeight:800,color:C.white}}>Warehouses</h2><div style={{fontSize:12,color:C.muted,marginTop:3}}>Locations used across the portal</div></div>
-        {mayAdd&&<Btn v="primary" onClick={()=>{setForm({code:"",name:"",address:"",active:true});setModal("add");}}>+ Add Warehouse</Btn>}
+        <div><h2 style={{margin:0,fontSize:20,fontWeight:800,color:C.white}}>Warehouses</h2><div style={{fontSize:12,color:C.muted,marginTop:3}}>Locations used across the portal · disabled warehouses can't be selected for new orders or user access</div></div>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <ActiveToggle showAll={showAll} setShowAll={setShowAll}/>
+          {mayAdd&&<Btn v="primary" onClick={()=>{setForm({code:"",name:"",address:"",active:true});setModal("add");}}>+ Add Warehouse</Btn>}
+        </div>
       </div>
       <div style={{...s.card,padding:0,overflow:"hidden"}}>
         <table style={{width:"100%",borderCollapse:"collapse"}}>
           <thead><tr style={{background:C.bg}}>{["Code","Name","Address","Status","Actions"].map(h=><th key={h} style={s.th}>{h}</th>)}</tr></thead>
-          <tbody>{warehouses.map((w,i)=>(
+          <tbody>{shown.map((w,i)=>(
             <tr key={w.id} style={{background:i%2?C.bg+"66":"transparent"}}>
               <td style={{...s.td,fontFamily:"monospace",color:C.teal,fontWeight:700}}>{w.code}</td>
               <td style={{...s.td,fontWeight:700}}>{w.name}</td>
@@ -2451,6 +2479,7 @@ function WarehouseMgmt({warehouses,setWarehouses,isAdmin,perm="full"}){
             </tr>
           ))}</tbody>
         </table>
+        {shown.length===0&&<div style={{padding:"30px",textAlign:"center",color:C.muted}}>No {showAll?"":"active "}warehouses.</div>}
       </div>
       {modal&&(
         <Modal title={modal==="add"?"Add Warehouse":"Edit Warehouse"} onClose={()=>setModal(null)}>
@@ -2469,8 +2498,9 @@ function WarehouseMgmt({warehouses,setWarehouses,isAdmin,perm="full"}){
 // ============================================================
 // USERS (admin only)
 // ============================================================
-function UserMgmt({users,setUsers,warehouses=[]}){
+function UserMgmt({users,setUsers,warehouses=[],presence={},currentUsername=null}){
   const[modal,setModal]=useState(null);
+  const[showAll,setShowAll]=useState(true); // true = all users, false = active only
   const blank={name:"",username:"",password:"",role:"staff",active:true,permissions:{dashboard:"view",inbound:"add",outbound:"add",history:"view",inventory:"view"},allowedWarehouses:[]};
   const[form,setForm]=useState(blank);
   const save=()=>{
@@ -2484,22 +2514,37 @@ function UserMgmt({users,setUsers,warehouses=[]}){
     else setUsers(p=>p.map(u=>u.id===form.id?{...clean}:u));
     setModal(null);
   };
+  // Delete a user, but never remove the last admin, and never the account you're signed in as.
+  const del=(u)=>{
+    if(currentUsername&&u.username===currentUsername){alert("You can't delete the account you're currently signed in as.");return;}
+    const admins=users.filter(x=>x.role==="admin");
+    if(u.role==="admin"&&admins.length<=1){alert("Cannot delete the last admin. There must always be at least one admin user.");return;}
+    if(!window.confirm(`Delete user "${u.name}" (${u.username})? This permanently removes the login and cannot be undone.`))return;
+    setUsers(p=>p.filter(x=>x.id!==u.id));
+  };
   const setPerm=(id,lvl)=>setForm(f=>({...f,permissions:{...(f.permissions||{}),[id]:lvl}}));
   const toggleWh=(code)=>setForm(f=>({...f,allowedWarehouses:(f.allowedWarehouses||[]).includes(code)?f.allowedWarehouses.filter(x=>x!==code):[...(f.allowedWarehouses||[]),code]}));
   const roleTag=(r)=>({admin:["Admin","amber"],warehouse:["Warehouse","teal"]}[r]||["Staff","blue"]);
   const permCount=(u)=>u.role==="admin"?"All":Object.values(u.permissions||{}).filter(v=>v&&v!=="none").length+" sections";
+  // Online = heartbeat seen within the last 3 minutes.
+  const ONLINE_MS=3*60*1000;
+  const isOnline=(u)=>{const t=presence&&presence[u.username];const ms=t?new Date(t).getTime():0;return ms>0&&(Date.now()-ms)<ONLINE_MS;};
+  const shown=showAll?users:users.filter(u=>u.active);
 
   return(
     <div style={{display:"flex",flexDirection:"column",gap:18}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div><h2 style={{margin:0,fontSize:20,fontWeight:800,color:C.white}}>Users &amp; Permissions</h2><div style={{fontSize:12,color:C.muted,marginTop:3}}>Admin assigns logins, section access and warehouse locations</div></div>
-        <Btn v="primary" onClick={()=>{setForm(blank);setModal("add");}}>+ Add User</Btn>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <ActiveToggle showAll={showAll} setShowAll={setShowAll}/>
+          <Btn v="primary" onClick={()=>{setForm(blank);setModal("add");}}>+ Add User</Btn>
+        </div>
       </div>
       <div style={{...s.card,padding:0,overflow:"hidden"}}>
         <div style={{overflowX:"auto"}}>
-          <table style={{width:"100%",borderCollapse:"collapse",minWidth:900}}>
-            <thead><tr style={{background:C.bg}}>{["Name","Username","Password","Role","Sections","Warehouses","Status","Actions"].map(h=><th key={h} style={s.th}>{h}</th>)}</tr></thead>
-            <tbody>{users.map((u,i)=>{const[rl,rc]=roleTag(u.role);return(
+          <table style={{width:"100%",borderCollapse:"collapse",minWidth:980}}>
+            <thead><tr style={{background:C.bg}}>{["Name","Username","Password","Role","Sections","Warehouses","Login","Status","Actions"].map(h=><th key={h} style={s.th}>{h}</th>)}</tr></thead>
+            <tbody>{shown.map((u,i)=>{const[rl,rc]=roleTag(u.role);const on=isOnline(u);return(
               <tr key={u.id} style={{background:i%2?C.bg+"66":"transparent"}}>
                 <td style={{...s.td,fontWeight:700}}>{u.name}</td>
                 <td style={{...s.td,fontFamily:"monospace",color:C.amber}}>{u.username}</td>
@@ -2507,11 +2552,13 @@ function UserMgmt({users,setUsers,warehouses=[]}){
                 <td style={s.td}><Tag label={rl} color={rc}/></td>
                 <td style={{...s.td,fontSize:11,color:C.muted}}>{permCount(u)}</td>
                 <td style={{...s.td,fontSize:11,color:C.muted}}>{u.role==="admin"?"All":((u.allowedWarehouses||[]).length?u.allowedWarehouses.join(", "):"All")}</td>
+                <td style={s.td}><span style={{display:"inline-flex",alignItems:"center",gap:6,fontSize:11,fontWeight:700,color:on?C.green:C.muted}}><span style={{width:8,height:8,borderRadius:"50%",background:on?C.green:C.muted,display:"inline-block"}}/>{on?"On":"Off"}</span></td>
                 <td style={s.td}>{stTag(u.active?"Active":"Disabled")}</td>
-                <td style={s.td}><div style={{display:"flex",gap:4}}><Btn sm onClick={()=>{setForm({...blank,...u});setModal("edit");}}>Edit</Btn><Btn sm v="ghost" onClick={()=>setUsers(p=>p.map(x=>x.id===u.id?{...x,active:!x.active}:x))} style={{color:u.active?C.red:C.green,borderColor:(u.active?C.red:C.green)+"55"}}>{u.active?"Disable":"Enable"}</Btn></div></td>
+                <td style={s.td}><div style={{display:"flex",gap:4}}><Btn sm onClick={()=>{setForm({...blank,...u});setModal("edit");}}>Edit</Btn><Btn sm v="ghost" onClick={()=>setUsers(p=>p.map(x=>x.id===u.id?{...x,active:!x.active}:x))} style={{color:u.active?C.red:C.green,borderColor:(u.active?C.red:C.green)+"55"}}>{u.active?"Disable":"Enable"}</Btn><Btn sm v="danger" onClick={()=>del(u)}>Delete</Btn></div></td>
               </tr>
             );})}</tbody>
           </table>
+          {shown.length===0&&<div style={{padding:"30px",textAlign:"center",color:C.muted}}>No {showAll?"":"active "}users.</div>}
         </div>
       </div>
       {modal&&(
@@ -2545,11 +2592,12 @@ function UserMgmt({users,setUsers,warehouses=[]}){
               </div>
               <div style={s.sec}>Warehouse Locations {form.role==="warehouse"?"(user sees only these)":"(blank = all)"}</div>
               <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:16}}>
-                {warehouses.map(w=>(
+                {warehouses.filter(w=>w.active).map(w=>(
                   <label key={w.id} style={{display:"flex",alignItems:"center",gap:7,fontSize:13,color:(form.allowedWarehouses||[]).includes(w.code)?C.white:C.muted,cursor:"pointer",padding:"6px 10px",background:C.input,borderRadius:6,border:`1px solid ${(form.allowedWarehouses||[]).includes(w.code)?C.teal+"55":C.border}`}}>
                     <input type="checkbox" checked={(form.allowedWarehouses||[]).includes(w.code)} onChange={()=>toggleWh(w.code)}/>{w.code}
                   </label>
                 ))}
+                {warehouses.filter(w=>w.active).length===0&&<div style={{gridColumn:"1/-1",fontSize:12,color:C.muted}}>No active warehouses. Enable one in the Warehouses tab.</div>}
               </div>
             </>
           )}
@@ -3310,6 +3358,7 @@ function WMSApp({initial, onSave, cloudStatus, onReload}){
   const[invoices,setInvoices]=useState(initial.invoices);
   const[templates,setTemplates]=useState(initial.templates);
   const[adminPass,setAdminPass]=useState("11861186");
+  const[presence,setPresence]=useState({}); // { username: lastSeenIso } — who's currently online
 
   // Persist each collection to Supabase when it changes (skip the very first render).
   const firstRun=useRef(true);
@@ -3334,6 +3383,44 @@ function WMSApp({initial, onSave, cloudStatus, onReload}){
 
   const isAdmin=session?.kind==="staff"&&session.role==="admin";
 
+  // ---- Presence / login status -------------------------------------------
+  // A staff session writes its own "last seen" timestamp to a shared "presence"
+  // map every 60s (and once immediately). The Users screen reads this map to
+  // show who is online. Kept out of COLLECTIONS so heartbeats don't trip the
+  // normal save/Offline indicator or clobber other collections.
+  const sessionUser=session&&session.kind==="staff"?(session.username||session.name):null;
+  useEffect(()=>{
+    if(!sessionUser)return;
+    let stopped=false;
+    const beat=async()=>{
+      const r=await loadOne("presence");
+      const map=(r.ok&&r.value&&typeof r.value==="object"&&!Array.isArray(r.value))?{...r.value}:{};
+      map[sessionUser]=new Date().toISOString();
+      // prune very old entries (24h+) so the map doesn't grow forever
+      const cutoff=Date.now()-24*60*60*1000;
+      Object.keys(map).forEach(k=>{const t=new Date(map[k]).getTime();if(!t||t<cutoff)delete map[k];});
+      if(stopped)return;
+      await saveCollection("presence",map);
+      if(!stopped)setPresence(map);
+    };
+    beat();
+    const id=setInterval(beat,60000);
+    return ()=>{stopped=true;clearInterval(id);};
+  },[sessionUser]);
+
+  // Sign out: best-effort remove our presence entry so we show offline at once.
+  const signOut=async()=>{
+    if(sessionUser){
+      try{
+        const r=await loadOne("presence");
+        const map=(r.ok&&r.value&&typeof r.value==="object"&&!Array.isArray(r.value))?{...r.value}:{};
+        delete map[sessionUser];
+        await saveCollection("presence",map);
+      }catch(e){/* non-fatal */}
+    }
+    setSession(null);
+  };
+
   if(!session){
     return <Login customers={customers} users={users} adminPass={adminPass}
       onStaff={(u)=>{setSession({kind:"staff",...u});setTab("dashboard");}}
@@ -3352,7 +3439,7 @@ function WMSApp({initial, onSave, cloudStatus, onReload}){
             </div>
             <div style={{display:"flex",alignItems:"center",gap:12}}>
               <span style={{fontSize:12,color:C.muted}}>{session.customer.portalUser}</span>
-              <Btn sm v="ghost" onClick={()=>setSession(null)}>Sign Out</Btn>
+              <Btn sm v="ghost" onClick={signOut}>Sign Out</Btn>
             </div>
           </div>
         </div>
@@ -3406,7 +3493,7 @@ function WMSApp({initial, onSave, cloudStatus, onReload}){
             {session.role==="warehouse"&&<span style={{background:C.tealD,border:`1px solid ${C.teal}44`,color:C.teal,fontSize:10,fontWeight:700,padding:"3px 8px",borderRadius:12}}>{(session.allowedWarehouses||[])[0]||"WAREHOUSE"}</span>}
             <span title={cloudStatus==="error"?"Not connected to database — changes may not be saved":"Saved to cloud"} style={{fontSize:10,fontWeight:700,padding:"3px 8px",borderRadius:12,background:cloudStatus==="saving"?C.amberD:cloudStatus==="error"?C.redD:C.tealD,color:cloudStatus==="saving"?C.amber:cloudStatus==="error"?C.red:C.teal,border:`1px solid ${(cloudStatus==="saving"?C.amber:cloudStatus==="error"?C.red:C.teal)}44`}}>{cloudStatus==="saving"?"Saving…":cloudStatus==="error"?"● Offline":"● Cloud"}</span>
             {onReload&&<Btn sm v="ghost" onClick={onReload} title="Reload latest data from the database">Refresh</Btn>}
-            <Btn sm v="ghost" onClick={()=>setSession(null)}>Sign Out</Btn>
+            <Btn sm v="ghost" onClick={signOut}>Sign Out</Btn>
           </div>
         </div>
       </div>
@@ -3424,7 +3511,7 @@ function WMSApp({initial, onSave, cloudStatus, onReload}){
         {tab==="customers"&&canView(permOf("customers"))&&<CustomerMgmt customers={customers} setCustomers={setCustomers} isAdmin={isAdmin} perm={permOf("customers")}/>}
         {tab==="carriers"&&canView(permOf("carriers"))&&<CarrierMgmt carriers={carriers} setCarriers={setCarriers} isAdmin={isAdmin} perm={permOf("carriers")}/>}
         {tab==="warehouses"&&canView(permOf("warehouses"))&&<WarehouseMgmt warehouses={warehouses} setWarehouses={setWarehouses} isAdmin={isAdmin} perm={permOf("warehouses")}/>}
-        {tab==="users"&&isAdmin&&<UserMgmt users={users} setUsers={setUsers} warehouses={warehouses}/>}
+        {tab==="users"&&isAdmin&&<UserMgmt users={users} setUsers={setUsers} warehouses={warehouses} presence={presence} currentUsername={sessionUser}/>}
       </div>
     </div>
   );
