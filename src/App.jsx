@@ -26,6 +26,14 @@ const today = new Date();
 const dAgo=(n)=>{ const d=new Date(today); d.setDate(d.getDate()-n); return d.toISOString().split("T")[0]; };
 const dFwd=(n)=>{ const d=new Date(today); d.setDate(d.getDate()+n); return d.toISOString().split("T")[0]; };
 const fmtD=(s)=>s?new Date(s+"T12:00:00").toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"}):"-";
+// Format an ISO timestamp (date + time) for comment entries.
+const fmtTS=(iso)=>{try{return iso?new Date(iso).toLocaleString("en-US",{month:"short",day:"numeric",year:"numeric",hour:"numeric",minute:"2-digit"}):"at receiving";}catch(e){return "";}};
+// Normalize a ledger entry's comments into a list of {text, ts}, merging the legacy single comment.
+const getComments=(entry)=>{
+  const arr=Array.isArray(entry&&entry.comments)?entry.comments.slice():[];
+  if(entry&&entry.comment&&!arr.some(x=>x.text===entry.comment))arr.unshift({text:entry.comment,ts:null});
+  return arr;
+};
 const fmtDT=(d)=>d.toISOString().slice(0,16).replace("T"," ");
 const aging=(d)=>d?Math.max(0,Math.floor((today-new Date(d+"T12:00:00"))/86400000)):0;
 // inclusive day count between two YYYY-MM-DD dates (both endpoints counted)
@@ -277,6 +285,36 @@ function Modal({title,onClose,children,wide}){
     </div>
   );
 }
+// Reusable comment thread: shows each comment with the real time it was entered,
+// and (when canAdd) lets the user add a new comment even after a shipment is received.
+function CommentThread({comments,canAdd,onAdd}){
+  const[txt,setTxt]=useState("");
+  const list=Array.isArray(comments)?comments:[];
+  const add=()=>{const t=txt.trim();if(!t)return;onAdd&&onAdd(t);setTxt("");};
+  return(
+    <div style={{marginBottom:18,border:`1px solid ${C.border}`,borderRadius:8,background:C.bg,padding:12}}>
+      <div style={{fontSize:11,color:C.muted,fontWeight:700,letterSpacing:"0.06em",textTransform:"uppercase",marginBottom:8}}>Comments</div>
+      {list.length===0
+        ? <div style={{color:C.muted,fontSize:12,marginBottom:canAdd?12:0}}>No comments yet.</div>
+        : <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:canAdd?12:0}}>
+            {list.map((c,i)=>(
+              <div key={i} style={{background:C.input,border:`1px solid ${C.border}`,borderRadius:6,padding:"8px 10px"}}>
+                <div style={{color:C.white,fontSize:13,whiteSpace:"pre-wrap",wordBreak:"break-word"}}>{c.text}</div>
+                <div style={{color:C.muted,fontSize:11,marginTop:4}}>{fmtTS(c.ts)}</div>
+              </div>
+            ))}
+          </div>}
+      {canAdd&&(
+        <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
+          <textarea value={txt} onChange={e=>setTxt(e.target.value)} placeholder="Add a comment…" rows={2}
+            style={{flex:1,...s.input,resize:"vertical",fontFamily:"inherit"}}
+            onKeyDown={e=>{if(e.key==="Enter"&&(e.ctrlKey||e.metaKey)){e.preventDefault();add();}}}/>
+          <Btn sm v="primary" onClick={add}>Add</Btn>
+        </div>
+      )}
+    </div>
+  );
+}
 function KPI({label,value,sub,color,active,onClick}){
   return(
     <div onClick={onClick} style={{...s.card,padding:"16px 20px",cursor:onClick?"pointer":"default",borderColor:active?C.amber:C.border,minWidth:150,flex:"1 1 0"}}>
@@ -458,12 +496,14 @@ function Inbound({orders,setOrders,customers,warehouses,isAdmin,perm="full",logA
     }
     const files=recvFiles.map(f=>({name:f.name,dataUrl:f.dataUrl,type:f.type}));
     const comment=recvComment.trim();
+    const nowIso=new Date().toISOString();
+    const comments=comment?[{text:comment,ts:nowIso}]:[];
     const newLedger=[]; const idMap={}; const upd={};
     recvLines.forEach(ln=>{
       const lid="L"+uid(); idMap[ln.id]=lid;
       const rp=Number(ln.recvPlts||0), ru=Number(ln.recvUnits||0);
       upd[ln.id]={recvPlts:rp,recvUnits:ru};
-      newLedger.push({id:lid,customerId:ln.customerId,project:ln.project,warehouseCode:ln.warehouseCode,containerNo:ln.containerNo,lot:"",sku:ln.sku,description:ln.description,loadingType:ln.loadingType,ibDate:rd,inPlts:rp,inUnits:ru,movements:[],comment,attachments:files,expPlts:ln.expPlts,expUnits:ln.expUnits});
+      newLedger.push({id:lid,customerId:ln.customerId,project:ln.project,warehouseCode:ln.warehouseCode,containerNo:ln.containerNo,lot:"",sku:ln.sku,description:ln.description,loadingType:ln.loadingType,ibDate:rd,inPlts:rp,inUnits:ru,movements:[],comment,comments,attachments:files,expPlts:ln.expPlts,expUnits:ln.expUnits});
     });
     setOrders(p=>p.map(x=>idMap[x.id]?{...x,status:"Received",receivedDate:rd,ledgerId:idMap[x.id],plts:upd[x.id].recvPlts,units:upd[x.id].recvUnits,expPlts:x.plts,expUnits:x.units,recvComment:comment}:x));
     setLedger(p=>[...newLedger,...p]);
@@ -695,7 +735,7 @@ function Inbound({orders,setOrders,customers,warehouses,isAdmin,perm="full",logA
                               {!multi&&o.status==="Scheduled"&&<Btn sm v="ghost" onClick={()=>printPalletLabels([o])} style={{color:C.purple,borderColor:C.purple+"55"}}>Pallet Labels</Btn>}
                               {mayEdit&&!hasRelatedOut(o)&&<Btn sm v="ghost" onClick={()=>{setForm(o);setModal("edit");}} style={{color:C.amber,borderColor:C.amber+"55"}}>Edit</Btn>}
                               {!multi&&mayAdd&&<Btn sm v="ghost" onClick={()=>duplicateOrder(o)} style={{color:C.blue,borderColor:C.blue+"55"}}>Duplicate</Btn>}
-                              {o.status==="Received"&&o.ledgerId&&(()=>{const le=ledger.find(x=>x.id===o.ledgerId);const has=le&&((le.attachments&&le.attachments.length>0)||le.comment);return has?<Btn sm v="ghost" onClick={()=>setAttView({ledgerId:le.id,containerNo:le.containerNo,files:le.attachments||[],comment:le.comment})} style={{color:C.blue,borderColor:C.blue+"55"}}>Files{le.attachments&&le.attachments.length?" ("+le.attachments.length+")":""}</Btn>:null;})()}
+                              {o.status==="Received"&&o.ledgerId&&(()=>{const le=ledger.find(x=>x.id===o.ledgerId);if(!le)return null;const nF=(le.attachments||[]).length;const nC=getComments(le).length;return <Btn sm v="ghost" onClick={()=>setAttView({ledgerId:le.id,containerNo:le.containerNo,files:le.attachments||[],comment:le.comment})} style={{color:C.blue,borderColor:C.blue+"55"}}>Files &amp; Notes{nF?" 📎"+nF:""}{nC?" 💬"+nC:""}</Btn>;})()}
                               {mayFull&&o.status==="Received"&&!hasRelatedOut(o)&&<Btn sm v="ghost" onClick={()=>unreceiveOrder(o)} style={{color:C.orange,borderColor:C.orange+"55"}}>Undo Recv</Btn>}
                               {!multi&&mayFull&&o.status!=="Received"&&<Btn sm v="danger" onClick={()=>voidOrder(o)}>Void</Btn>}
                               {hasRelatedOut(o)&&<Tag label="🔒 Has Outbound" color="orange"/>}
@@ -864,9 +904,9 @@ function Inbound({orders,setOrders,customers,warehouses,isAdmin,perm="full",logA
         </Modal>
       );})()}
 
-      {attView&&(
+      {attView&&(()=>{const le=ledger.find(x=>x.id===attView.ledgerId)||{};const cmts=getComments(le);return(
         <Modal title={`Files — ${attView.containerNo}`} onClose={()=>setAttView(null)} wide>
-          {attView.comment&&<div style={{background:C.input,borderRadius:8,padding:"10px 14px",marginBottom:14,fontSize:13}}><span style={{color:C.muted,fontSize:11,fontWeight:700}}>COMMENT</span><div>{attView.comment}</div></div>}
+          <CommentThread comments={cmts} canAdd={mayAdd} onAdd={(txt)=>{setLedger(p=>p.map(x=>x.id===attView.ledgerId?{...x,comments:[...getComments(x),{text:txt,ts:new Date().toISOString()}]}:x));logActivity&&logActivity("Inbound comment added",attView.containerNo,"","");}}/>
           {(attView.files||[]).length===0?<div style={{color:C.muted,padding:"20px",textAlign:"center"}}>No photos attached.</div>:(
             <div style={{display:"flex",flexWrap:"wrap",gap:12}}>
               {attView.files.map((f,i)=>(
@@ -903,7 +943,7 @@ function Inbound({orders,setOrders,customers,warehouses,isAdmin,perm="full",logA
           }}>Delete All</Btn></div>}
           {!mayFull&&<div style={{marginTop:14,fontSize:11,color:C.muted}}>Deleting attachments requires Full Access to Inbound.</div>}
         </Modal>
-      )}
+      );})()}
     </div>
   );
 }
@@ -1161,14 +1201,27 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
     try{
       // If a custom BOL was uploaded for this order, use it instead of the system BOL.
       if(o.customBOL&&o.customBOL.dataUrl){
-        const w0=window.open("","_blank");
-        if(!w0){alert("Pop-up blocked. Please allow pop-ups to open the custom BOL.");return;}
-        if((o.customBOL.type||"").includes("pdf")){
-          w0.document.write(`<!DOCTYPE html><html><head><title>BOL ${o.reference||o.containerNo}</title><style>html,body{margin:0;height:100%}</style></head><body><iframe src="${o.customBOL.dataUrl}" style="border:0;width:100%;height:100vh"></iframe></body></html>`);
+        const isPdf=(o.customBOL.type||"").includes("pdf")||(o.customBOL.name||"").toLowerCase().endsWith(".pdf")||o.customBOL.dataUrl.startsWith("data:application/pdf");
+        if(isPdf){
+          // Convert the stored data URL to a Blob and open it in the browser's native
+          // PDF viewer (which has a working Print button). data: URLs don't print reliably.
+          try{
+            const base64=o.customBOL.dataUrl.split(",")[1]||"";
+            const bin=atob(base64);
+            const bytes=new Uint8Array(bin.length);
+            for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
+            const blob=new Blob([bytes],{type:"application/pdf"});
+            const url=URL.createObjectURL(blob);
+            const w0=window.open(url,"_blank");
+            if(!w0){alert("Pop-up blocked. Please allow pop-ups to open the custom BOL PDF.");URL.revokeObjectURL(url);return;}
+            setTimeout(()=>URL.revokeObjectURL(url),60000);
+          }catch(err){alert("Could not open the custom BOL PDF: "+err.message);}
         } else {
+          const w0=window.open("","_blank");
+          if(!w0){alert("Pop-up blocked. Please allow pop-ups to open the custom BOL.");return;}
           w0.document.write(`<!DOCTYPE html><html><head><title>BOL ${o.reference||o.containerNo}</title></head><body onload="setTimeout(function(){window.print()},400)" style="margin:0"><img src="${o.customBOL.dataUrl}" style="width:100%"/></body></html>`);
+          w0.document.close();
         }
-        w0.document.close();
         return;
       }
       const c=cust(o.customerId);
@@ -1949,16 +2002,16 @@ function InventoryLedger({ledger,setLedger,orders=[],customers,warehouses,isAdmi
                           <td style={{...s.td,fontWeight:800,color:C.amber}}>{b.plts}</td>
                           <td style={{...s.td,fontWeight:800,color:C.amber}}>{num(b.units)}</td>
                         </tr>
-                        {(l.comment||(l.attachments&&l.attachments.length>0)||(l.expPlts!=null&&(l.expPlts!==l.inPlts||l.expUnits!==l.inUnits)))&&(
+                        {(()=>{const cc=getComments(l);const nFiles=(l.attachments||[]).length;return(
                           <tr style={{background:"transparent"}}>
                             <td style={s.td}></td>
                             <td colSpan={14} style={{...s.td,fontSize:11,color:C.muted,paddingLeft:16}}>
                               {l.expPlts!=null&&(l.expPlts!==l.inPlts||l.expUnits!==l.inUnits)&&<span style={{color:C.orange,marginRight:12}}>⚠ Short received — expected {l.expPlts} plt / {num(l.expUnits)} u</span>}
-                              {l.comment&&<span style={{marginRight:12}}>💬 {l.comment}</span>}
-                              {l.attachments&&l.attachments.length>0&&<span onClick={()=>setAttView({ledgerId:l.id,containerNo:l.containerNo,files:l.attachments,comment:l.comment})} style={{color:C.blue,cursor:"pointer",textDecoration:"underline"}}>📎 {l.attachments.length} photo(s) — View</span>}
+                              {cc.length>0&&<span style={{marginRight:12}}>💬 {cc[cc.length-1].text}{cc.length>1?` (+${cc.length-1} more)`:""}</span>}
+                              <span onClick={()=>setAttView({ledgerId:l.id,containerNo:l.containerNo,files:l.attachments||[],comment:l.comment})} style={{color:C.blue,cursor:"pointer",textDecoration:"underline"}}>{nFiles>0?`📎 ${nFiles} photo(s)`:"📎 Files"} / 💬 Comment — View</span>
                             </td>
                           </tr>
-                        )}
+                        );})()}
                         {!balanceOnly&&(l.movements||[]).map((m,mi)=>{
                           // running balance after this movement
                           const upto=(l.movements||[]).slice(0,mi+1).reduce((a,x)=>({p:a.p+(x.outPlts||0),u:a.u+(x.outUnits||0)}),{p:0,u:0});
@@ -1985,9 +2038,9 @@ function InventoryLedger({ledger,setLedger,orders=[],customers,warehouses,isAdmi
           {filtered.length===0&&<div style={{padding:"40px",textAlign:"center",color:C.muted}}>No inventory found.</div>}
         </div>
       </div>
-      {attView&&(
+      {attView&&(()=>{const le=ledger.find(x=>x.id===attView.ledgerId)||{};const cmts=getComments(le);return(
         <Modal title={`Attachments — ${attView.containerNo}`} onClose={()=>setAttView(null)} wide>
-          {attView.comment&&<div style={{background:C.input,borderRadius:8,padding:"10px 14px",marginBottom:14,fontSize:13}}><span style={{color:C.muted,fontSize:11,fontWeight:700}}>COMMENT</span><div>{attView.comment}</div></div>}
+          <CommentThread comments={cmts} canAdd={mayAdd} onAdd={(txt)=>{setLedger(p=>p.map(x=>x.id===attView.ledgerId?{...x,comments:[...getComments(x),{text:txt,ts:new Date().toISOString()}]}:x));logActivity&&logActivity("Inventory comment added",attView.containerNo,"","");}}/>
           {(attView.files||[]).length===0?<div style={{color:C.muted,padding:"20px",textAlign:"center"}}>No photos attached.</div>:(
             <div style={{display:"flex",flexWrap:"wrap",gap:12}}>
               {attView.files.map((f,i)=>(
@@ -2024,7 +2077,7 @@ function InventoryLedger({ledger,setLedger,orders=[],customers,warehouses,isAdmi
           }}>Delete All</Btn></div>}
           {!mayFull&&<div style={{marginTop:14,fontSize:11,color:C.muted}}>Deleting attachments requires Full Access to Inventory.</div>}
         </Modal>
-      )}
+      );})()}
     </div>
   );
 }
