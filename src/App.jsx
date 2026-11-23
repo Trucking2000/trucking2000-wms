@@ -306,8 +306,14 @@ function Inbound({orders,setOrders,customers,warehouses,isAdmin,perm="full",logA
   const lineTemplate={containerNo:"",cntrSize:"40HQ",loadingType:"F2P - Floor to Pallet",sku:"",description:"",plts:"",units:"",reference:"",ttsPo:""};
   const empty={type:"IN",submitted:today.toISOString().split("T")[0],eta:"",etd:"",customerId:"",project:"",warehouseCode:"",containerNo:"",cntrSize:"40HQ",loadingType:"F2P - Floor to Pallet",sku:"",description:"",plts:"",units:"",reference:"",ttsPo:"",notes:"",status:"Submitted",shipMode:"",carrierId:"",docCount:0,confirmedDate:"",receivedDate:"",shippedDate:"",lines:[{...lineTemplate}]};
   const[form,setForm]=useState(empty);
-  const[recvModal,setRecvModal]=useState(null); // order pending receive
+  const[recvModal,setRecvModal]=useState(null); // true when receive window open
   const[recvDate,setRecvDate]=useState(today.toISOString().split("T")[0]);
+  const[recvLines,setRecvLines]=useState([]);   // SKU lines being received (editable qty)
+  const[recvComment,setRecvComment]=useState("");
+  const[recvFiles,setRecvFiles]=useState([]);     // [{name,dataUrl,type}]
+  const[recvCust,setRecvCust]=useState("");       // customer id of the receive session
+  const[sel,setSel]=useState({});                  // container key -> true (multi-container receive)
+  const[attView,setAttView]=useState(null);        // {ledgerId,containerNo,files,comment}
 
   // "Show Received" lists every received order; otherwise show the open ones.
   const inbound=orders.filter(o=>o.type==="IN"&&o.status!=="Cancelled"&&(showReceived?o.status==="Received":o.status!=="Received"));
@@ -372,19 +378,17 @@ function Inbound({orders,setOrders,customers,warehouses,isAdmin,perm="full",logA
     setOrders(p=>p.map(x=>ids.has(x.id)?{...x,status:"Scheduled",confirmedDate:today.toISOString().split("T")[0]}:x));
     logActivity("IN confirmed",g[0].containerNo+" ("+ids.size+" SKU)",g[0].customerId,g[0].warehouseCode);
   };
-  const receiveGroup=(g,dateStr)=>{
-    const rd=dateStr||today.toISOString().split("T")[0];
-    const c=cust(g[0].customerId);
-    if(!rateSheetCoveringDate(c,rd)){alert("Cannot receive on "+fmtD(rd)+": no rate card covers this date for "+(c?.name||"this customer")+". Adjust the receiving date or add/extend a quote sheet in Customers → Rate Card.");return false;}
-    const toRecv=g.filter(x=>x.status==="Scheduled");
-    if(toRecv.length===0)return false;
-    const newLedger=[];
-    const idMap={};
-    toRecv.forEach(o=>{ const lid="L"+uid(); idMap[o.id]=lid; newLedger.push({id:lid,customerId:o.customerId,project:o.project,warehouseCode:o.warehouseCode,containerNo:o.containerNo,lot:"",sku:o.sku,description:o.description,loadingType:o.loadingType,ibDate:rd,inPlts:Number(o.plts||0),inUnits:Number(o.units||0),movements:[]}); });
-    setOrders(p=>p.map(x=>idMap[x.id]?{...x,status:"Received",receivedDate:rd,ledgerId:idMap[x.id]}:x));
-    setLedger(p=>[...newLedger,...p]);
-    logActivity("IN received",g[0].containerNo+" ("+toRecv.length+" SKU)",g[0].customerId,g[0].warehouseCode);
-    return true;
+  // Undo Confirm — move a Scheduled order (or whole container) back to Submitted.
+  const unconfirmOrder=(o)=>{
+    if(o.status!=="Scheduled")return;
+    setOrders(p=>p.map(x=>x.id===o.id?{...x,status:"Submitted",confirmedDate:""}:x));
+    logActivity("IN confirm undone",o.containerNo,o.customerId,o.warehouseCode);
+  };
+  const unconfirmGroup=(g)=>{
+    const ids=new Set(g.filter(x=>x.status==="Scheduled").map(x=>x.id));
+    if(ids.size===0)return;
+    setOrders(p=>p.map(x=>ids.has(x.id)?{...x,status:"Submitted",confirmedDate:""}:x));
+    logActivity("IN confirm undone",g[0].containerNo+" ("+ids.size+" SKU)",g[0].customerId,g[0].warehouseCode);
   };
   const voidGroup=(g)=>{
     const open=g.filter(x=>x.status!=="Received");
@@ -399,19 +403,135 @@ function Inbound({orders,setOrders,customers,warehouses,isAdmin,perm="full",logA
     setOrders(p=>p.map(x=>x.id===o.id?{...x,status:"Cancelled"}:x));
     logActivity("IN voided",o.containerNo,o.customerId,o.warehouseCode);
   };
-  const receiveOrder=(o,dateStr)=>{
-    const rd=dateStr||today.toISOString().split("T")[0];
-    const c=cust(o.customerId);
-    if(!rateSheetCoveringDate(c,rd)){alert("Cannot receive on "+fmtD(rd)+": no rate card covers this date for "+(c?.name||"this customer")+". Adjust the receiving date or add/extend a quote sheet in Customers → Rate Card.");return false;}
-    const newLedgerId="L"+uid();
-    setOrders(p=>p.map(x=>x.id===o.id?{...x,status:"Received",receivedDate:rd,ledgerId:newLedgerId}:x));
-    setLedger(p=>[{id:newLedgerId,customerId:o.customerId,project:o.project,warehouseCode:o.warehouseCode,
-      containerNo:o.containerNo,lot:"",sku:o.sku,description:o.description,loadingType:o.loadingType,
-      ibDate:rd,inPlts:Number(o.plts||0),inUnits:Number(o.units||0),movements:[]},...p]);
-    logActivity("IN received",o.containerNo,o.customerId,o.warehouseCode);
-    return true;
+  // Open the receive window for one or more containers' worth of Scheduled SKU lines.
+  const openReceive=(orderList)=>{
+    const sched=orderList.filter(o=>o.status==="Scheduled");
+    if(sched.length===0){alert("Nothing to receive — these lines must be Confirmed (Scheduled) first.");return;}
+    const custs=[...new Set(sched.map(o=>o.customerId))];
+    if(custs.length>1){alert("Selected containers belong to different customers. Receive one customer at a time (their rate cards differ).");return;}
+    setRecvCust(custs[0]);
+    setRecvLines(sched.map(o=>({id:o.id,containerNo:o.containerNo,customerId:o.customerId,warehouseCode:o.warehouseCode,project:o.project,loadingType:o.loadingType,cntrSize:o.cntrSize,sku:o.sku,description:o.description,reference:o.reference,ttsPo:o.ttsPo,expPlts:Number(o.plts||0),expUnits:Number(o.units||0),recvPlts:String(o.plts||0),recvUnits:String(o.units||0)})));
+    setRecvComment("");setRecvFiles([]);setRecvDate(today.toISOString().split("T")[0]);setRecvModal(true);
   };
-  const openReceive=(o)=>{ setRecvDate(today.toISOString().split("T")[0]); setRecvModal(o); };
+  // Commit the receive: create one ledger entry per SKU line at the RECEIVED quantity,
+  // carrying the comment + attachments so they show in Inventory. Updates each order to
+  // the actual received qty (so billing/history reflect what was really taken in).
+  const doReceive=()=>{
+    const rd=recvDate||today.toISOString().split("T")[0];
+    const c=cust(recvCust);
+    if(!rateSheetCoveringDate(c,rd)){alert("Cannot receive on "+fmtD(rd)+": no rate card covers this date for "+(c?.name||"this customer")+".");return;}
+    for(const ln of recvLines){
+      const needsP=(()=>{const t=(ln.loadingType||"").toLowerCase();return t.includes("f2p")||t.includes("p2p")||t.includes("f2f")||t.includes("floor")||t.includes("pallet");})();
+      if(needsP&&!(Number(ln.recvPlts)>0)){alert("Received pallets must be greater than 0 for "+ln.containerNo+" / "+ln.sku+".");return;}
+      if(Number(ln.recvPlts)>ln.expPlts){alert("Received pallets ("+ln.recvPlts+") cannot exceed expected ("+ln.expPlts+") for "+ln.containerNo+" / "+ln.sku+". You can only reduce.");return;}
+      if(Number(ln.recvUnits)>ln.expUnits){alert("Received units ("+ln.recvUnits+") cannot exceed expected ("+ln.expUnits+") for "+ln.containerNo+" / "+ln.sku+". You can only reduce.");return;}
+    }
+    const files=recvFiles.map(f=>({name:f.name,dataUrl:f.dataUrl,type:f.type}));
+    const comment=recvComment.trim();
+    const newLedger=[]; const idMap={}; const upd={};
+    recvLines.forEach(ln=>{
+      const lid="L"+uid(); idMap[ln.id]=lid;
+      const rp=Number(ln.recvPlts||0), ru=Number(ln.recvUnits||0);
+      upd[ln.id]={recvPlts:rp,recvUnits:ru};
+      newLedger.push({id:lid,customerId:ln.customerId,project:ln.project,warehouseCode:ln.warehouseCode,containerNo:ln.containerNo,lot:"",sku:ln.sku,description:ln.description,loadingType:ln.loadingType,ibDate:rd,inPlts:rp,inUnits:ru,movements:[],comment,attachments:files,expPlts:ln.expPlts,expUnits:ln.expUnits});
+    });
+    setOrders(p=>p.map(x=>idMap[x.id]?{...x,status:"Received",receivedDate:rd,ledgerId:idMap[x.id],plts:upd[x.id].recvPlts,units:upd[x.id].recvUnits,expPlts:x.plts,expUnits:x.units,recvComment:comment}:x));
+    setLedger(p=>[...newLedger,...p]);
+    const conts=[...new Set(recvLines.map(l=>l.containerNo))];
+    logActivity("IN received",conts.join(", ")+" ("+recvLines.length+" SKU"+(recvLines.length>1?"s":"")+")"+(comment?" · note":"")+(files.length?" · "+files.length+" file(s)":""),recvCust,recvLines[0].warehouseCode);
+    setRecvModal(null);setRecvLines([]);setRecvFiles([]);setRecvComment("");setSel({});
+  };
+  // Compress an image file to a small JPEG data URL (keeps the stored payload light).
+  const addFiles=(fileList)=>{
+    const arr=Array.from(fileList||[]);
+    arr.forEach(file=>{
+      if(file.type&&file.type.startsWith("image/")){
+        const reader=new FileReader();
+        reader.onload=e=>{
+          const img=new Image();
+          img.onload=()=>{
+            const maxDim=1024;
+            let {width,height}=img;
+            if(width>maxDim||height>maxDim){const r=Math.min(maxDim/width,maxDim/height);width=Math.round(width*r);height=Math.round(height*r);}
+            const cv=document.createElement("canvas");cv.width=width;cv.height=height;
+            cv.getContext("2d").drawImage(img,0,0,width,height);
+            const dataUrl=cv.toDataURL("image/jpeg",0.55);
+            setRecvFiles(p=>[...p,{name:file.name,dataUrl,type:"image/jpeg"}]);
+          };
+          img.src=e.target.result;
+        };
+        reader.readAsDataURL(file);
+      } else {
+        // non-image: store as-is only if small (<1.5MB) to protect the data row
+        if(file.size>1.5*1024*1024){alert("\""+file.name+"\" is too large to attach (over 1.5 MB). Please attach images or small files.");return;}
+        const reader=new FileReader();
+        reader.onload=e=>setRecvFiles(p=>[...p,{name:file.name,dataUrl:e.target.result,type:file.type||"application/octet-stream"}]);
+        reader.readAsDataURL(file);
+      }
+    });
+  };
+  // ---- Print: Packing Slip (one container) ----
+  const printPackingSlip=(rows)=>{
+    const o0=rows[0]; const c=cust(o0.customerId); const wh=warehouses.find(w=>w.code===o0.warehouseCode);
+    const totalPlts=rows.reduce((a,r)=>a+Number(r.plts||0),0);
+    const totalUnits=rows.reduce((a,r)=>a+Number(r.units||0),0);
+    const lineRows=rows.map(r=>`<tr><td style="border:1px solid #000;padding:6px 8px;font-family:monospace">${r.sku||"-"}</td><td style="border:1px solid #000;padding:6px 8px">${r.description||"-"}</td><td style="border:1px solid #000;padding:6px 8px;text-align:center">${r.plts||0}</td><td style="border:1px solid #000;padding:6px 8px;text-align:center">${num(r.units)}</td></tr>`).join("");
+    const doc=`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Packing Slip ${o0.containerNo}</title>
+    <style>@page{size:letter;margin:0.5in}body{font-family:Arial,sans-serif;color:#000;margin:0}</style></head>
+    <body onload="setTimeout(function(){window.print()},400)">
+      <div style="display:flex;justify-content:space-between;border-bottom:3px solid #000;padding-bottom:10px">
+        <div><div style="font-size:22px;font-weight:bold">PACKING SLIP</div><div style="font-size:12px;color:#444">Trucking 2000 WMS</div></div>
+        <div style="text-align:right;font-size:12px">Date: <b>${fmtD(todayStr())}</b></div>
+      </div>
+      <table style="width:100%;margin-top:14px;font-size:13px"><tr>
+        <td style="vertical-align:top;width:50%"><b style="font-size:11px;color:#555">CONTAINER #</b><br><span style="font-family:monospace;font-size:16px;font-weight:bold">${o0.containerNo}</span><br><span style="font-size:12px">Size: ${o0.cntrSize||"-"} · ${o0.loadingType||""}</span></td>
+        <td style="vertical-align:top;width:50%"><b style="font-size:11px;color:#555">CUSTOMER / WAREHOUSE</b><br>${(c&&c.name)||""}<br><span style="font-size:12px">${(wh&&wh.name)||o0.warehouseCode||""}</span></td>
+      </tr></table>
+      <table style="width:100%;border-collapse:collapse;margin-top:16px;font-size:13px">
+        <tr style="background:#eee"><th style="border:1px solid #000;padding:7px 8px;text-align:left">SKU</th><th style="border:1px solid #000;padding:7px 8px;text-align:left">Description</th><th style="border:1px solid #000;padding:7px 8px">Pallets</th><th style="border:1px solid #000;padding:7px 8px">Units</th></tr>
+        ${lineRows}
+        <tr style="font-weight:bold;background:#f6f6f6"><td style="border:1px solid #000;padding:7px 8px" colspan="2" align="right">TOTAL</td><td style="border:1px solid #000;padding:7px 8px;text-align:center">${totalPlts}</td><td style="border:1px solid #000;padding:7px 8px;text-align:center">${num(totalUnits)}</td></tr>
+      </table>
+      <div style="margin-top:50px;display:flex;justify-content:space-between;font-size:12px">
+        <div style="width:45%;border-top:1px solid #000;padding-top:6px">Received by (signature)</div>
+        <div style="width:35%;border-top:1px solid #000;padding-top:6px">Date</div>
+      </div>
+    </body></html>`;
+    const w=window.open("","_blank"); if(w){w.document.write(doc);w.document.close();} else alert("Pop-up blocked. Allow pop-ups to print.");
+  };
+  // ---- Print: Pallet Labels (4x6, one per pallet) ----
+  const printPalletLabels=(rows)=>{
+    const o0=rows[0];
+    const total=rows.reduce((a,r)=>a+Number(r.plts||0),0);
+    if(total<=0){alert("No pallets to label for this container.");return;}
+    let n=0; let labels="";
+    rows.forEach(r=>{
+      const cnt=Number(r.plts||0);
+      for(let i=0;i<cnt;i++){
+        n++;
+        labels+=`<div class="label">
+          <div class="brand">TRUCKING 2000 WMS</div>
+          <div class="cno">${o0.containerNo}</div>
+          <div class="pof">${n} <span style="font-size:28px">of</span> ${total} <span style="font-size:34px">Pallets</span></div>
+          <div class="meta">${r.sku?("SKU: "+r.sku):""}</div>
+          <div class="meta">${cust(o0.customerId)?.name||""} · ${o0.warehouseCode||""}</div>
+        </div>`;
+      }
+    });
+    const doc=`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Pallet Labels ${o0.containerNo}</title>
+    <style>
+      @page{size:4in 6in;margin:0}
+      *{box-sizing:border-box}
+      body{margin:0;font-family:Arial,sans-serif;color:#000}
+      .label{width:4in;height:6in;padding:0.3in;page-break-after:always;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;border:2px solid #000}
+      .brand{font-size:16px;letter-spacing:2px;color:#444;margin-bottom:10px}
+      .cno{font-size:42px;font-weight:bold;font-family:monospace;word-break:break-all;margin-bottom:24px}
+      .pof{font-size:58px;font-weight:bold;margin-bottom:24px}
+      .meta{font-size:16px;color:#333;margin-top:6px}
+    </style></head>
+    <body onload="setTimeout(function(){window.print()},400)">${labels}</body></html>`;
+    const w=window.open("","_blank"); if(w){w.document.write(doc);w.document.close();} else alert("Pop-up blocked. Allow pop-ups to print.");
+  };
   const duplicateOrder=(o)=>{
     setForm({...empty,customerId:o.customerId,project:o.project,warehouseCode:o.warehouseCode,eta:"",notes:o.notes,
       lines:[{containerNo:o.containerNo,cntrSize:o.cntrSize,loadingType:o.loadingType,sku:o.sku,description:o.description,plts:o.plts,units:o.units,reference:o.reference,ttsPo:o.ttsPo}]});
@@ -443,7 +563,8 @@ function Inbound({orders,setOrders,customers,warehouses,isAdmin,perm="full",logA
       return;
     }
     if(!window.confirm("Undo receive for "+o.containerNo+"? This removes its inventory entry."))return;
-    setOrders(p=>p.map(x=>x.id===o.id?{...x,status:"Scheduled",receivedDate:"",ledgerId:""}:x));
+    // Restore the expected quantities that receiving may have reduced.
+    setOrders(p=>p.map(x=>x.id===o.id?{...x,status:"Scheduled",receivedDate:"",ledgerId:"",plts:x.expPlts!=null?x.expPlts:x.plts,units:x.expUnits!=null?x.expUnits:x.units}:x));
     if(o.ledgerId)setLedger(p=>p.filter(x=>x.id!==o.ledgerId));
     logActivity("IN receive undone",o.containerNo,o.customerId,o.warehouseCode);
   };
@@ -468,6 +589,7 @@ function Inbound({orders,setOrders,customers,warehouses,isAdmin,perm="full",logA
             <select value={filterCust} onChange={e=>setFilterCust(e.target.value)} style={{...s.input,width:150}}><option value="">All Customers</option>{customers.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select>
             <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="SKU / Container / PO# / Ref" style={{...s.input,width:200}}/>
             <Btn sm v="ghost" onClick={()=>exportExcel("inbound.xls","Inbound",filtered.map(o=>({Submitted:o.submitted,ETA:o.eta,Customer:cust(o.customerId)?.name,Location:o.warehouseCode,Container:o.containerNo,Size:o.cntrSize,Loading_Type:o.loadingType,SKU:o.sku,Plts:o.plts,Units:o.units,Reference:o.reference,PO:o.ttsPo,Status:o.status})))} style={{color:C.green,borderColor:C.green+"55"}}>Export Excel</Btn>
+            {mayAdd&&(()=>{const keys=Object.keys(sel).filter(k=>sel[k]);const chosen=filtered.filter(o=>o.status==="Scheduled"&&keys.includes(o.containerNo+"|"+o.customerId+"|"+o.warehouseCode));const n=new Set(chosen.map(o=>o.containerNo)).size;return n>0?<Btn sm v="success" onClick={()=>openReceive(chosen)}>Receive Selected ({n})</Btn>:null;})()}
             {mayAdd&&<Btn sm v="ghost" onClick={()=>setTplModal(true)} style={{color:C.teal,borderColor:C.teal+"55"}}>Templates ({inTemplates.length})</Btn>}
             {mayAdd&&<Btn sm v="primary" onClick={()=>{setForm(empty);setModal("add");}}>+ New Inbound</Btn>}
           </div>
@@ -499,7 +621,7 @@ function Inbound({orders,setOrders,customers,warehouses,isAdmin,perm="full",logA
                           <td style={{...s.td,color:C.muted,fontSize:11.5}}>{fmtD(o0.eta)}</td>
                           <td style={{...s.td,fontWeight:700}}>{cust(o0.customerId)?.name}<div style={{fontSize:10,color:C.muted}}>{o0.project}</div></td>
                           <td style={{...s.td,fontSize:11,color:C.teal,fontFamily:"monospace"}}>{o0.warehouseCode}</td>
-                          <td style={{...s.td,fontFamily:"monospace",color:C.amber,fontWeight:800}}>{o0.containerNo}<div style={{fontSize:10,color:C.muted,fontWeight:400}}>{rows.length} SKUs</div></td>
+                          <td style={{...s.td,fontFamily:"monospace",color:C.amber,fontWeight:800}}><div style={{display:"flex",alignItems:"center",gap:6}}>{anySched&&mayAdd&&<input type="checkbox" checked={!!sel[g.key]} onChange={e=>setSel(p=>({...p,[g.key]:e.target.checked}))} title="Select for batch receive"/>}<span>{o0.containerNo}</span></div><div style={{fontSize:10,color:C.muted,fontWeight:400}}>{rows.length} SKUs</div></td>
                           <td style={s.td}><Tag label={o0.cntrSize} color="blue"/></td>
                           <td style={{...s.td,fontSize:11}}>{ltTag(o0.loadingType)}</td>
                           <td style={{...s.td,fontSize:11,color:C.muted,fontStyle:"italic"}}>whole container</td>
@@ -510,7 +632,10 @@ function Inbound({orders,setOrders,customers,warehouses,isAdmin,perm="full",logA
                           <td style={s.td}>
                             <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
                               {anySub&&mayAdd&&<Btn sm v="primary" onClick={()=>confirmGroup(rows)}>Confirm All</Btn>}
-                              {anySched&&mayAdd&&<Btn sm v="success" onClick={()=>openReceive({...o0,_group:rows})}>Receive All</Btn>}
+                              {anySched&&mayAdd&&<Btn sm v="ghost" onClick={()=>unconfirmGroup(rows)} style={{color:C.orange,borderColor:C.orange+"55"}}>Undo Confirm</Btn>}
+                              {anySched&&mayAdd&&<Btn sm v="success" onClick={()=>openReceive(rows)}>Receive All</Btn>}
+                              {anySched&&<Btn sm v="ghost" onClick={()=>printPackingSlip(rows)} style={{color:C.blue,borderColor:C.blue+"55"}}>Packing Slip</Btn>}
+                              {anySched&&<Btn sm v="ghost" onClick={()=>printPalletLabels(rows)} style={{color:C.purple,borderColor:C.purple+"55"}}>Pallet Labels</Btn>}
                               {mayFull&&anyOpen&&<Btn sm v="danger" onClick={()=>voidGroup(rows)}>Void All</Btn>}
                             </div>
                           </td>
@@ -522,7 +647,7 @@ function Inbound({orders,setOrders,customers,warehouses,isAdmin,perm="full",logA
                           <td style={{...s.td,color:C.muted,fontSize:11.5}}>{multi?"":fmtD(o.eta)}</td>
                           <td style={{...s.td,fontWeight:700}}>{multi?"":<>{cust(o.customerId)?.name}<div style={{fontSize:10,color:C.muted}}>{o.project}</div></>}</td>
                           <td style={{...s.td,fontSize:11,color:C.teal,fontFamily:"monospace"}}>{multi?"":o.warehouseCode}</td>
-                          <td style={{...s.td,fontFamily:"monospace",color:C.amber,fontWeight:700,paddingLeft:multi?24:undefined}}>{multi?<span style={{color:C.muted,fontSize:11}}>↳</span>:o.containerNo}</td>
+                          <td style={{...s.td,fontFamily:"monospace",color:C.amber,fontWeight:700,paddingLeft:multi?24:undefined}}>{multi?<span style={{color:C.muted,fontSize:11}}>↳</span>:<div style={{display:"flex",alignItems:"center",gap:6}}>{o.status==="Scheduled"&&mayAdd&&<input type="checkbox" checked={!!sel[g.key]} onChange={e=>setSel(p=>({...p,[g.key]:e.target.checked}))} title="Select for batch receive"/>}<span>{o.containerNo}</span></div>}</td>
                           <td style={s.td}>{multi?"":<Tag label={o.cntrSize} color="blue"/>}</td>
                           <td style={{...s.td,fontSize:11}}>{ltTag(o.loadingType)}</td>
                           <td style={s.td}>{o.sku}<div style={{fontSize:10,color:C.muted}}>{o.description}</div></td>
@@ -534,9 +659,13 @@ function Inbound({orders,setOrders,customers,warehouses,isAdmin,perm="full",logA
                           <td style={s.td}>
                             <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
                               {!multi&&o.status==="Submitted"&&mayAdd&&<Btn sm v="primary" onClick={()=>confirmOrder(o)}>Confirm</Btn>}
-                              {!multi&&o.status==="Scheduled"&&mayAdd&&<Btn sm v="success" onClick={()=>openReceive(o)}>Receive</Btn>}
+                              {!multi&&o.status==="Scheduled"&&mayAdd&&<Btn sm v="ghost" onClick={()=>unconfirmOrder(o)} style={{color:C.orange,borderColor:C.orange+"55"}}>Undo Confirm</Btn>}
+                              {!multi&&o.status==="Scheduled"&&mayAdd&&<Btn sm v="success" onClick={()=>openReceive([o])}>Receive</Btn>}
+                              {!multi&&o.status==="Scheduled"&&<Btn sm v="ghost" onClick={()=>printPackingSlip([o])} style={{color:C.blue,borderColor:C.blue+"55"}}>Packing Slip</Btn>}
+                              {!multi&&o.status==="Scheduled"&&<Btn sm v="ghost" onClick={()=>printPalletLabels([o])} style={{color:C.purple,borderColor:C.purple+"55"}}>Pallet Labels</Btn>}
                               {mayEdit&&!hasRelatedOut(o)&&<Btn sm v="ghost" onClick={()=>{setForm(o);setModal("edit");}} style={{color:C.amber,borderColor:C.amber+"55"}}>Edit</Btn>}
                               {!multi&&mayAdd&&<Btn sm v="ghost" onClick={()=>duplicateOrder(o)} style={{color:C.blue,borderColor:C.blue+"55"}}>Duplicate</Btn>}
+                              {o.status==="Received"&&o.ledgerId&&(()=>{const le=ledger.find(x=>x.id===o.ledgerId);const has=le&&((le.attachments&&le.attachments.length>0)||le.comment);return has?<Btn sm v="ghost" onClick={()=>setAttView({ledgerId:le.id,containerNo:le.containerNo,files:le.attachments||[],comment:le.comment})} style={{color:C.blue,borderColor:C.blue+"55"}}>Files{le.attachments&&le.attachments.length?" ("+le.attachments.length+")":""}</Btn>:null;})()}
                               {mayFull&&o.status==="Received"&&!hasRelatedOut(o)&&<Btn sm v="ghost" onClick={()=>unreceiveOrder(o)} style={{color:C.orange,borderColor:C.orange+"55"}}>Undo Recv</Btn>}
                               {!multi&&mayFull&&o.status!=="Received"&&<Btn sm v="danger" onClick={()=>voidOrder(o)}>Void</Btn>}
                               {hasRelatedOut(o)&&<Tag label="🔒 Has Outbound" color="orange"/>}
@@ -627,27 +756,112 @@ function Inbound({orders,setOrders,customers,warehouses,isAdmin,perm="full",logA
         </Modal>
       )}
 
-      {recvModal&&(
-        <Modal title={recvModal._group?"Receive Container (all SKUs)":"Receive Order"} onClose={()=>setRecvModal(null)}>
-          <div style={{background:C.input,borderRadius:8,padding:"12px 16px",marginBottom:16,fontSize:13}}>
-            <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}><span style={{color:C.muted}}>Container</span><span style={{fontWeight:700,fontFamily:"monospace",color:C.amber}}>{recvModal.containerNo}</span></div>
-            <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}><span style={{color:C.muted}}>Customer</span><span style={{fontWeight:700}}>{cust(recvModal.customerId)?.name}</span></div>
-            {recvModal._group?(
-              <div style={{display:"flex",justifyContent:"space-between"}}><span style={{color:C.muted}}>SKUs to receive</span><span style={{fontWeight:700}}>{recvModal._group.filter(x=>x.status==="Scheduled").length} · {recvModal._group.reduce((a,x)=>a+Number(x.plts||0),0)} plt / {num(recvModal._group.reduce((a,x)=>a+Number(x.units||0),0))} u</span></div>
-            ):(
-              <div style={{display:"flex",justifyContent:"space-between"}}><span style={{color:C.muted}}>Quantity</span><span>{recvModal.plts} plt / {num(recvModal.units)} u</span></div>
-            )}
+      {recvModal&&(()=>{
+        const conts=[...new Set(recvLines.map(l=>l.containerNo))];
+        const cov=rateSheetCoveringDate(cust(recvCust),recvDate);
+        const setLine=(idx,field,val)=>setRecvLines(p=>p.map((l,i)=>i===idx?{...l,[field]:val}:l));
+        return (
+        <Modal title={conts.length>1?`Receive ${conts.length} Containers`:"Receive Container"} onClose={()=>setRecvModal(null)} wide>
+          <div style={{background:C.input,borderRadius:8,padding:"12px 16px",marginBottom:14,fontSize:13}}>
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}><span style={{color:C.muted}}>Customer</span><span style={{fontWeight:700}}>{cust(recvCust)?.name}</span></div>
+            <div style={{display:"flex",justifyContent:"space-between"}}><span style={{color:C.muted}}>Containers</span><span style={{fontWeight:700,fontFamily:"monospace",color:C.amber}}>{conts.join(", ")}</span></div>
           </div>
-          <div style={{marginBottom:16}}>
-            <TI label="Receiving Date" type="date" value={recvDate} onChange={e=>setRecvDate(e.target.value)} autoFocus/>
-            <div style={{fontSize:11,color:C.muted,marginTop:6}}>Defaults to today. This date is used as the inbound date for storage billing.</div>
-            {(()=>{const cov=rateSheetCoveringDate(cust(recvModal.customerId),recvDate);return cov?(
+
+          <div style={{marginBottom:14}}>
+            <TI label="Receiving Date" type="date" value={recvDate} onChange={e=>setRecvDate(e.target.value)}/>
+            {cov?(
               <div style={{fontSize:11,color:C.green,marginTop:6}}>✓ Covered by rate card {cov.quoteNo} ({fmtD(cov.effectiveDate)}–{fmtD(cov.expiryDate)})</div>
             ):(
-              <div style={{background:C.redD,border:`1px solid ${C.red}44`,borderRadius:6,padding:"8px 12px",marginTop:8,fontSize:12,color:C.red}}>⚠ No rate card covers {fmtD(recvDate)}. Choose a date within a quote sheet period, or add/extend one in Customers → Rate Card.</div>
-            );})()}
+              <div style={{background:C.redD,border:`1px solid ${C.red}44`,borderRadius:6,padding:"8px 12px",marginTop:8,fontSize:12,color:C.red}}>⚠ No rate card covers {fmtD(recvDate)}. Choose a date within a quote sheet period.</div>
+            )}
           </div>
-          <div style={{display:"flex",gap:8}}><Btn v="success" onClick={()=>{const ok=recvModal._group?receiveGroup(recvModal._group,recvDate):receiveOrder(recvModal,recvDate);if(ok)setRecvModal(null);}} style={{opacity:rateSheetCoveringDate(cust(recvModal.customerId),recvDate)?1:0.5}}>Confirm Receive</Btn><Btn onClick={()=>setRecvModal(null)}>Cancel</Btn></div>
+
+          <div style={s.sec}>SKU lines — enter the ACTUAL received quantity (you can reduce if short)</div>
+          <div style={{overflowX:"auto",marginBottom:14}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+              <thead><tr style={{background:C.bg}}>{["Container","SKU","Description","Exp. Plts","Recv Plts","Exp. Units","Recv Units"].map(h=><th key={h} style={{...s.th,padding:"7px 8px"}}>{h}</th>)}</tr></thead>
+              <tbody>
+                {recvLines.map((ln,idx)=>{
+                  const short=Number(ln.recvPlts)<ln.expPlts||Number(ln.recvUnits)<ln.expUnits;
+                  return(
+                  <tr key={ln.id} style={{background:short?C.amberD:"transparent"}}>
+                    <td style={{...s.td,padding:"6px 8px",fontFamily:"monospace",color:C.amber}}>{ln.containerNo}</td>
+                    <td style={{...s.td,padding:"6px 8px"}}>{ln.sku}</td>
+                    <td style={{...s.td,padding:"6px 8px",color:C.muted}}>{ln.description}</td>
+                    <td style={{...s.td,padding:"6px 8px",color:C.muted,textAlign:"center"}}>{ln.expPlts}</td>
+                    <td style={{...s.td,padding:"6px 8px"}}><input type="number" min="0" max={ln.expPlts} value={ln.recvPlts} onChange={e=>setLine(idx,"recvPlts",e.target.value)} style={{...s.input,width:80,padding:"4px 6px"}}/></td>
+                    <td style={{...s.td,padding:"6px 8px",color:C.muted,textAlign:"center"}}>{num(ln.expUnits)}</td>
+                    <td style={{...s.td,padding:"6px 8px"}}><input type="number" min="0" max={ln.expUnits} value={ln.recvUnits} onChange={e=>setLine(idx,"recvUnits",e.target.value)} style={{...s.input,width:90,padding:"4px 6px"}}/></td>
+                  </tr>
+                );})}
+              </tbody>
+            </table>
+            <div style={{fontSize:11,color:C.muted,marginTop:4}}>Amber rows are short-received (less than expected). Received quantity cannot exceed expected.</div>
+          </div>
+
+          <div style={{marginBottom:14}}>
+            <label style={s.label}>Comment (visible in Inventory)</label>
+            <textarea value={recvComment} onChange={e=>setRecvComment(e.target.value)} rows={2} placeholder="e.g. 2 cartons damaged, short 1 pallet…" style={{...s.input,width:"100%",resize:"vertical"}}/>
+          </div>
+
+          <div style={{marginBottom:16}}>
+            <label style={s.label}>Photos / Attachments (visible in Inventory)</label>
+            <div
+              onDragOver={e=>{e.preventDefault();}}
+              onDrop={e=>{e.preventDefault();addFiles(e.dataTransfer.files);}}
+              style={{border:`2px dashed ${C.border}`,borderRadius:8,padding:"18px",textAlign:"center",color:C.muted,fontSize:12,cursor:"pointer",background:C.bg}}
+              onClick={()=>document.getElementById("recv-file-input")?.click()}>
+              Drag &amp; drop photos here, or click to choose files.<br/>
+              <span style={{fontSize:11}}>Tip: you can drag an image straight from a Microsoft Teams chat into this box. Images are compressed automatically.</span>
+            </div>
+            <input id="recv-file-input" type="file" multiple accept="image/*" style={{display:"none"}} onChange={e=>{addFiles(e.target.files);e.target.value="";}}/>
+            {recvFiles.length>0&&(
+              <div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:10}}>
+                {recvFiles.map((f,i)=>(
+                  <div key={i} style={{position:"relative",width:72,height:72,borderRadius:6,overflow:"hidden",border:`1px solid ${C.border}`}}>
+                    {f.type.startsWith("image/")?<img src={f.dataUrl} alt={f.name} style={{width:"100%",height:"100%",objectFit:"cover"}}/>:<div style={{fontSize:10,padding:4,color:C.muted}}>{f.name}</div>}
+                    <span onClick={()=>setRecvFiles(p=>p.filter((_,x)=>x!==i))} style={{position:"absolute",top:2,right:2,background:"rgba(0,0,0,0.6)",color:"#fff",borderRadius:"50%",width:18,height:18,textAlign:"center",lineHeight:"18px",cursor:"pointer",fontSize:12}}>×</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div style={{display:"flex",gap:8}}>
+            <Btn v="success" onClick={doReceive} style={{opacity:cov?1:0.5}}>Confirm Receive</Btn>
+            <Btn onClick={()=>setRecvModal(null)}>Cancel</Btn>
+          </div>
+        </Modal>
+      );})()}
+
+      {attView&&(
+        <Modal title={`Files — ${attView.containerNo}`} onClose={()=>setAttView(null)} wide>
+          {attView.comment&&<div style={{background:C.input,borderRadius:8,padding:"10px 14px",marginBottom:14,fontSize:13}}><span style={{color:C.muted,fontSize:11,fontWeight:700}}>COMMENT</span><div>{attView.comment}</div></div>}
+          {(attView.files||[]).length===0?<div style={{color:C.muted,padding:"20px",textAlign:"center"}}>No photos attached.</div>:(
+            <div style={{display:"flex",flexWrap:"wrap",gap:12}}>
+              {attView.files.map((f,i)=>(
+                <div key={i} style={{position:"relative"}}>
+                  <a href={f.dataUrl} download={f.name} title="Click to download" style={{display:"block"}}>
+                    {f.type&&f.type.startsWith("image/")?<img src={f.dataUrl} alt={f.name} style={{maxWidth:220,maxHeight:220,borderRadius:8,border:`1px solid ${C.border}`}}/>:<div style={{padding:12,border:`1px solid ${C.border}`,borderRadius:8,color:C.teal}}>{f.name}</div>}
+                  </a>
+                  {mayFull&&<span onClick={()=>{
+                    if(!window.confirm("Delete this attachment? This cannot be undone."))return;
+                    const nextFiles=attView.files.filter((_,x)=>x!==i);
+                    setLedger(p=>p.map(x=>x.id===attView.ledgerId?{...x,attachments:nextFiles}:x));
+                    logActivity&&logActivity("Inventory attachment deleted",attView.containerNo,"","");
+                    setAttView(v=>v?{...v,files:nextFiles}:v);
+                  }} title="Delete this attachment" style={{position:"absolute",top:6,right:6,background:"rgba(0,0,0,0.65)",color:"#fff",borderRadius:"50%",width:24,height:24,textAlign:"center",lineHeight:"24px",cursor:"pointer",fontWeight:700}}>×</span>}
+                </div>
+              ))}
+            </div>
+          )}
+          {mayFull&&(attView.files||[]).length>1&&<div style={{marginTop:16}}><Btn sm v="danger" onClick={()=>{
+            if(!window.confirm(`Delete ALL ${attView.files.length} attachments for ${attView.containerNo}? This cannot be undone.`))return;
+            setLedger(p=>p.map(x=>x.id===attView.ledgerId?{...x,attachments:[]}:x));
+            logActivity&&logActivity("Inventory attachments cleared",attView.containerNo,"","");
+            setAttView(v=>v?{...v,files:[]}:v);
+          }}>Delete All</Btn></div>}
+          {!mayFull&&<div style={{marginTop:14,fontSize:11,color:C.muted}}>Deleting attachments requires Full Access to Inbound.</div>}
         </Modal>
       )}
     </div>
@@ -1367,6 +1581,7 @@ function InventoryLedger({ledger,setLedger,orders=[],customers,warehouses,isAdmi
   const[filterCust,setFilterCust]=useState("");
   const[search,setSearch]=useState("");
   const[balanceOnly,setBalanceOnly]=useState(false);
+  const[attView,setAttView]=useState(null);
   const cust=(id)=>customers.find(c=>c.id===id);
 
   const balOf=(l)=>{const o=(l.movements||[]).reduce((a,m)=>({p:a.p+(m.outPlts||0),u:a.u+(m.outUnits||0)}),{p:0,u:0});return {plts:l.inPlts-o.p,units:l.inUnits-o.u};};
@@ -1489,6 +1704,16 @@ function InventoryLedger({ledger,setLedger,orders=[],customers,warehouses,isAdmi
                           <td style={{...s.td,fontWeight:800,color:C.amber}}>{b.plts}</td>
                           <td style={{...s.td,fontWeight:800,color:C.amber}}>{num(b.units)}</td>
                         </tr>
+                        {(l.comment||(l.attachments&&l.attachments.length>0)||(l.expPlts!=null&&(l.expPlts!==l.inPlts||l.expUnits!==l.inUnits)))&&(
+                          <tr style={{background:"transparent"}}>
+                            <td style={s.td}></td>
+                            <td colSpan={14} style={{...s.td,fontSize:11,color:C.muted,paddingLeft:16}}>
+                              {l.expPlts!=null&&(l.expPlts!==l.inPlts||l.expUnits!==l.inUnits)&&<span style={{color:C.orange,marginRight:12}}>⚠ Short received — expected {l.expPlts} plt / {num(l.expUnits)} u</span>}
+                              {l.comment&&<span style={{marginRight:12}}>💬 {l.comment}</span>}
+                              {l.attachments&&l.attachments.length>0&&<span onClick={()=>setAttView({ledgerId:l.id,containerNo:l.containerNo,files:l.attachments,comment:l.comment})} style={{color:C.blue,cursor:"pointer",textDecoration:"underline"}}>📎 {l.attachments.length} photo(s) — View</span>}
+                            </td>
+                          </tr>
+                        )}
                         {!balanceOnly&&(l.movements||[]).map((m,mi)=>{
                           // running balance after this movement
                           const upto=(l.movements||[]).slice(0,mi+1).reduce((a,x)=>({p:a.p+(x.outPlts||0),u:a.u+(x.outUnits||0)}),{p:0,u:0});
@@ -1515,6 +1740,36 @@ function InventoryLedger({ledger,setLedger,orders=[],customers,warehouses,isAdmi
           {filtered.length===0&&<div style={{padding:"40px",textAlign:"center",color:C.muted}}>No inventory found.</div>}
         </div>
       </div>
+      {attView&&(
+        <Modal title={`Attachments — ${attView.containerNo}`} onClose={()=>setAttView(null)} wide>
+          {attView.comment&&<div style={{background:C.input,borderRadius:8,padding:"10px 14px",marginBottom:14,fontSize:13}}><span style={{color:C.muted,fontSize:11,fontWeight:700}}>COMMENT</span><div>{attView.comment}</div></div>}
+          {(attView.files||[]).length===0?<div style={{color:C.muted,padding:"20px",textAlign:"center"}}>No photos attached.</div>:(
+            <div style={{display:"flex",flexWrap:"wrap",gap:12}}>
+              {attView.files.map((f,i)=>(
+                <div key={i} style={{position:"relative"}}>
+                  <a href={f.dataUrl} download={f.name} title="Click to download" style={{display:"block"}}>
+                    {f.type&&f.type.startsWith("image/")?<img src={f.dataUrl} alt={f.name} style={{maxWidth:220,maxHeight:220,borderRadius:8,border:`1px solid ${C.border}`}}/>:<div style={{padding:12,border:`1px solid ${C.border}`,borderRadius:8,color:C.teal}}>{f.name}</div>}
+                  </a>
+                  {mayFull&&<span onClick={()=>{
+                    if(!window.confirm("Delete this attachment? This cannot be undone."))return;
+                    const nextFiles=attView.files.filter((_,x)=>x!==i);
+                    setLedger(p=>p.map(x=>x.id===attView.ledgerId?{...x,attachments:nextFiles}:x));
+                    logActivity&&logActivity("Inventory attachment deleted",attView.containerNo,"","");
+                    setAttView(v=>v?{...v,files:nextFiles}:v);
+                  }} title="Delete this attachment" style={{position:"absolute",top:6,right:6,background:"rgba(0,0,0,0.65)",color:"#fff",borderRadius:"50%",width:24,height:24,textAlign:"center",lineHeight:"24px",cursor:"pointer",fontWeight:700}}>×</span>}
+                </div>
+              ))}
+            </div>
+          )}
+          {mayFull&&(attView.files||[]).length>1&&<div style={{marginTop:16}}><Btn sm v="danger" onClick={()=>{
+            if(!window.confirm(`Delete ALL ${attView.files.length} attachments for ${attView.containerNo}? This cannot be undone.`))return;
+            setLedger(p=>p.map(x=>x.id===attView.ledgerId?{...x,attachments:[]}:x));
+            logActivity&&logActivity("Inventory attachments cleared",attView.containerNo,"","");
+            setAttView(v=>v?{...v,files:[]}:v);
+          }}>Delete All</Btn></div>}
+          {!mayFull&&<div style={{marginTop:14,fontSize:11,color:C.muted}}>Deleting attachments requires Full Access to Inventory.</div>}
+        </Modal>
+      )}
     </div>
   );
 }
