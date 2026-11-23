@@ -77,7 +77,7 @@ const BILLING_TERMS=["Net 15","Net 30","Net 45","Net 60","Due on receipt","Prepa
 const CUST_ST=["Active","Suspended","Disabled"];
 const SHIP_MODES=["FTL","LTL","Parcel","LTL/Direct","Pickup"];
 
-const emptyRC=()=>({freeDays:0,storagePerPallet:0,storagePerContainer:0,storagePerCarton:0,storagePerPiece:0,f2fUnload:0,f2fSort:0,f2fHandling:0,f2fReload:0,f2pUnload:0,f2pPalletize:0,f2pPallet:0,f2pWrap:0,f2pLabel:0,f2pAirbag:0,p2pForklift:0,p2pStorage:0,p2pLoading:0,p2pLabel:0,p2pAirbag:0,handlingFee:0,shippingFee:0});
+const emptyRC=()=>({freeDays:0,storagePerPallet:0,storagePerContainer:0,storagePerCarton:0,storagePerPiece:0,f2fUnload:0,f2fSort:0,f2fHandling:0,f2fReload:0,f2pUnload:0,f2pPalletize:0,f2pPallet:0,f2pWrap:0,f2pLabel:0,f2pAirbag:0,p2pForklift:0,p2pStorage:0,p2pLoading:0,p2pLabel:0,p2pAirbag:0,handlingFee:0,shippingFee:0,documentFee:0});
 
 // Returns true if the customer has an Active, non-expired quote sheet valid today
 function hasValidRateSheet(customer){
@@ -917,8 +917,27 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
   const[tplModal,setTplModal]=useState(false);
   const[shipModal,setShipModal]=useState(null);
   const[shipDate,setShipDate]=useState(today.toISOString().split("T")[0]);
+  const[shipExtras,setShipExtras]=useState({}); // itemKey -> qty string
+  // Active rate-card rates for a customer at a given date (for extra ship items).
+  const ratesForCust=(customerId,date)=>{
+    const c=cust(customerId); if(!c)return null;
+    const sheets=(c.quoteSheets||[]).filter(q=>q.status==="Active");
+    const d=date||today.toISOString().split("T")[0];
+    const m=sheets.find(q=>(!q.effectiveDate||q.effectiveDate<=d)&&(!q.expiryDate||q.expiryDate>=d));
+    return (m||sheets[0])?.rates||null;
+  };
+  // Which extra rate-card items can be added at ship, by loading type.
+  const extraItemsFor=(loadingType)=>{
+    const t=(loadingType||"").toUpperCase();
+    if(t.includes("FULL CONTAINER"))return [];
+    if(t.startsWith("P2P"))return [{key:"p2pLabel",label:"Labeling"},{key:"p2pAirbag",label:"Airbag"}];
+    if(t.startsWith("F2P"))return [{key:"f2pPallet",label:"Pallet Fee"},{key:"f2pWrap",label:"Wrapping"},{key:"f2pLabel",label:"Labeling"},{key:"f2pAirbag",label:"Airbag"}];
+    return []; // F2F: nothing
+  };
   const[pick,setPick]=useState({}); // ledgerId -> {sel, plts, units}
   const[multiMode,setMultiMode]=useState(false);
+  const[invFilter,setInvFilter]=useState(""); // keyword filter for ship-from inventory list
+  const[fileModal,setFileModal]=useState(null); // order id whose files/BOL are being managed
   const[filterWh,setFilterWh]=useState("");
   const[filterCust,setFilterCust]=useState("");
   const[search,setSearch]=useState("");
@@ -928,7 +947,9 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
   const[selPrint,setSelPrint]=useState({}); // orderId -> true, for picking tickets
   // Freight cost may be entered by anyone with Full Access to Outbound (admin included).
   const isFreight=mayFull;
-  const empty={type:"OUT",submitted:today.toISOString().split("T")[0],eta:"",etd:"",customerId:"",project:"",warehouseCode:"",containerNo:"",cntrSize:"",loadingType:"",sku:"",description:"",plts:"",units:"",reference:"",ttsPo:"",notes:"",status:"Submitted",shipMode:"FTL",carrierId:"",mktShipFee:"",serviceLines:[],docCount:0,confirmedDate:"",receivedDate:"",shippedDate:"",ledgerId:""};
+  const empty={type:"OUT",submitted:today.toISOString().split("T")[0],eta:"",etd:"",customerId:"",project:"",warehouseCode:"",containerNo:"",cntrSize:"",loadingType:"",sku:"",description:"",plts:"",units:"",reference:"",ttsPo:"",t2so:"",notes:"",status:"Submitted",shipMode:"FTL",carrierId:"",mktShipFee:"",serviceLines:[],docCount:0,confirmedDate:"",receivedDate:"",shippedDate:"",ledgerId:"",
+    freightTerms:"Prepaid",tpName:"Trucking 2000",tpAddress:"402 Deerwood Glen Drive",tpCityStateZip:"Deer Park, TX 77536",
+    shipToName:"",shipToAddress:"",shipToCityStateZip:"",attachments:[],customBOL:null};
   const[form,setForm]=useState(empty);
   const[showShipped,setShowShipped]=useState(false);
 
@@ -949,12 +970,16 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
   // available ledger lines for the selected customer (with balance > 0)
   const balOf=(l)=>{const o=(l.movements||[]).reduce((a,m)=>({p:a.p+(m.outPlts||0),u:a.u+(m.outUnits||0)}),{p:0,u:0});return {plts:l.inPlts-o.p,units:l.inUnits-o.u};};
   const availLedger=ledger.filter(l=>l.customerId===form.customerId&&(balOf(l).units>0||balOf(l).plts>0)).sort((a,b)=>(a.containerNo||"").localeCompare(b.containerNo||"")||(a.sku||"").localeCompare(b.sku||""));
+  const availFiltered=invFilter.trim()?availLedger.filter(l=>[l.containerNo,l.sku,l.description,l.project].join(" ").toLowerCase().includes(invFilter.trim().toLowerCase())):availLedger;
 
   const save=()=>{
     if(!form.customerId){alert("Customer is required.");return;}
     const rc=cust(form.customerId);
     if(!hasValidRateSheet(rc)){alert("Cannot create order: "+(rc?.name||"this customer")+" has no active/valid rate sheet. Add or renew a quote sheet in Customers → Rate Card first.");return;}
     if(!form.etd){alert("ETD (estimated ship date) is required before you can process this order.");return;}
+    if(!(form.t2so&&String(form.t2so).trim())){alert("T2 SO# is required.");return;}
+    // Reference # is required; if left blank it auto-fills with the T2 SO#.
+    const effRef=(form.reference&&String(form.reference).trim())?form.reference:form.t2so;
     const cleanLines=(form.serviceLines||[]).filter(l=>l.desc&&(Number(l.qty)||0)>0).map(l=>({desc:l.desc,qty:Number(l.qty||0),unitPrice:Number(l.unitPrice||0)}));
 
     // MULTI-ITEM MODE: create one outbound order per selected inventory line
@@ -973,8 +998,9 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
       const newOrders=chosen.map((l,i)=>({
         type:"OUT",submitted:form.submitted,eta:"",etd:form.etd,customerId:l.customerId,project:l.project||form.project||"",warehouseCode:l.warehouseCode,
         containerNo:l.containerNo,cntrSize:"",loadingType:l.loadingType||"",sku:l.sku,description:l.description,
-        plts:Number(pick[l.id].plts||0),units:Number(pick[l.id].units||0),reference:form.reference,ttsPo:l.ttsPo||"",notes:form.notes,
+        plts:Number(pick[l.id].plts||0),units:Number(pick[l.id].units||0),reference:effRef,ttsPo:l.ttsPo||"",t2so:form.t2so,notes:form.notes,
         status:"Submitted",shipMode:form.shipMode,carrierId:form.carrierId,mktShipFee:"",serviceLines:i===0?cleanLines:[],
+        freightTerms:form.freightTerms,tpName:form.tpName,tpAddress:form.tpAddress,tpCityStateZip:form.tpCityStateZip,shipToName:form.shipToName,shipToAddress:form.shipToAddress,shipToCityStateZip:form.shipToCityStateZip,attachments:[],customBOL:null,
         docCount:0,confirmedDate:"",receivedDate:"",shippedDate:"",ledgerId:l.id,batchId:batch,id:"O"+uid()
       }));
       setOrders(p=>[...newOrders,...p]);
@@ -1010,11 +1036,11 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
       warehouseCode:src.warehouseCode, project:src.project||"", customerId:src.customerId,
     };
     if(modal==="add"){
-      const o={...form,...locked,id:"O"+uid(),plts,units,mktShipFee:Number(form.mktShipFee||0),serviceLines:cleanLines};
+      const o={...form,...locked,id:"O"+uid(),plts,units,reference:effRef,mktShipFee:Number(form.mktShipFee||0),serviceLines:cleanLines};
       setOrders(p=>[o,...p]);
       logActivity("OUT order created",locked.containerNo,locked.customerId,locked.warehouseCode);
     } else {
-      setOrders(p=>p.map(o=>{if(o.id!==form.id)return o;const{origPlts,origUnits,...clean}=form;return {...clean,...locked,plts,units,mktShipFee:Number(form.mktShipFee||0),serviceLines:cleanLines};}));
+      setOrders(p=>p.map(o=>{if(o.id!==form.id)return o;const{origPlts,origUnits,...clean}=form;return {...clean,...locked,plts,units,reference:effRef,mktShipFee:Number(form.mktShipFee||0),serviceLines:cleanLines};}));
       // If this is a shipped order, correct its inventory movement so stock matches.
       if(editingShipped){
         setLedger(p=>p.map(x=>{
@@ -1069,12 +1095,20 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
       alert(`Cannot ship: quantity exceeds current balance (${b.plts} plt / ${num(b.units)} u available). Edit the order first.`);
       return false;
     }
-    setOrders(p=>p.map(x=>x.id===o.id?{...x,status:"Shipped",shippedDate:sd,ledgerId:l.id}:x));
+    // Build extra service lines from the ship dialog (rate-card items by loading type).
+    const rates=ratesForCust(o.customerId,l.ibDate)||{};
+    const extraLines=[];
+    extraItemsFor(l.loadingType||o.loadingType).forEach(it=>{
+      const q=Number(shipExtras[it.key]||0);
+      if(q>0)extraLines.push({desc:it.label,qty:q,unitPrice:Number(rates[it.key]||0)});
+    });
+    const mergedLines=[...(o.serviceLines||[]),...extraLines];
+    setOrders(p=>p.map(x=>x.id===o.id?{...x,status:"Shipped",shippedDate:sd,ledgerId:l.id,serviceLines:mergedLines}:x));
     setLedger(p=>p.map(x=>x.id===l.id?{...x,movements:[...(x.movements||[]),{date:sd,outPlts:pp,outUnits:uu,ref:o.reference||o.containerNo,orderId:o.id}]}:x));
-    logActivity("OUT shipped",o.containerNo,o.customerId,o.warehouseCode);
+    logActivity("OUT shipped",o.containerNo+(extraLines.length?" · +"+extraLines.length+" item(s)":""),o.customerId,o.warehouseCode);
     return true;
   };
-  const openShip=(o)=>{ setShipDate(today.toISOString().split("T")[0]); setShipModal(o); };
+  const openShip=(o)=>{ setShipDate(today.toISOString().split("T")[0]); setShipExtras({}); setShipModal(o); };
   const unshipOrder=(o)=>{
     if(!window.confirm("Undo ship for "+o.containerNo+"? This restores the inventory that was deducted."))return;
     setOrders(p=>p.map(x=>x.id===o.id?{...x,status:"Scheduled",shippedDate:""}:x));
@@ -1121,85 +1155,123 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
   };
   const printBOL=(o)=>{
     try{
+      // If a custom BOL was uploaded for this order, use it instead of the system BOL.
+      if(o.customBOL&&o.customBOL.dataUrl){
+        const w0=window.open("","_blank");
+        if(!w0){alert("Pop-up blocked. Please allow pop-ups to open the custom BOL.");return;}
+        if((o.customBOL.type||"").includes("pdf")){
+          w0.document.write(`<!DOCTYPE html><html><head><title>BOL ${o.reference||o.containerNo}</title><style>html,body{margin:0;height:100%}</style></head><body><iframe src="${o.customBOL.dataUrl}" style="border:0;width:100%;height:100vh"></iframe></body></html>`);
+        } else {
+          w0.document.write(`<!DOCTYPE html><html><head><title>BOL ${o.reference||o.containerNo}</title></head><body onload="setTimeout(function(){window.print()},400)" style="margin:0"><img src="${o.customBOL.dataUrl}" style="width:100%"/></body></html>`);
+        }
+        w0.document.close();
+        return;
+      }
       const c=cust(o.customerId);
       const wh=warehouses.find(w=>w.code===o.warehouseCode);
       const car=carrier(o.carrierId);
       const items=(o.serviceLines||[]);
-      const cell="border:1px solid #000;padding:3px 5px;font-size:9px;vertical-align:top";
-      const hd="border:1px solid #000;padding:2px 5px;font-size:8px;font-weight:bold;background:#e8e8e8;text-align:center";
-      const lbl="font-size:7px;font-weight:bold;color:#000";
-      const bolNo=o.reference||o.containerNo;
+      const cell="border:1px solid #000;padding:4px 6px;font-size:10px;vertical-align:top";
+      const hd="border:1px solid #000;padding:3px 6px;font-size:9px;font-weight:bold;background:#000;color:#fff;text-align:center";
+      const lbl="font-size:8px;font-weight:bold;color:#000";
+      const chk=(t)=>o.freightTerms===t?"&#9746;":"&#9744;"; // ☒ or ☐
+      const bolNo=o.reference||o.t2so||o.containerNo;
+      const shipToName=o.shipToName||((c&&c.name)||"");
+      const shipToAddr=o.shipToAddress||((c&&c.address)||"");
+      const shipToCsz=o.shipToCityStateZip||"";
+      const is3p=o.freightTerms==="3rd Party";
+      const tpName=is3p?(o.tpName||""):"";
+      const tpAddr=is3p?(o.tpAddress||""):"";
+      const tpCsz=is3p?(o.tpCityStateZip||""):"";
       const doc=`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>BOL ${bolNo}</title>
       <style>
         @page{size:letter;margin:0.4in}
         *{box-sizing:border-box}
         body{font-family:Arial,Helvetica,sans-serif;color:#000;margin:0;font-size:10px}
         table{border-collapse:collapse;width:100%}
-        .title{text-align:center;font-size:16px;font-weight:bold;letter-spacing:1px}
-        .sub{text-align:center;font-size:8px;color:#333;margin-bottom:4px}
-        .box{border:1px solid #000}
         td{vertical-align:top}
+        .title{text-align:center;font-size:20px;font-weight:bold}
+        .bar{text-align:center;color:#bbb;font-size:11px;letter-spacing:3px;font-weight:bold;padding:8px 0}
+        .secbar{background:#000;color:#fff;font-weight:bold;text-align:center;font-size:10px;padding:2px}
+        .fld{font-size:11px;padding:2px 0}
       </style></head>
       <body onload="setTimeout(function(){window.print()},500)">
-        <table style="margin-bottom:2px"><tr>
-          <td style="width:60%"><div class="title">BILL OF LADING</div><div class="sub">Trucking 2000 WMS</div></td>
-          <td style="width:40%;text-align:right;font-size:9px">Date: <b>${fmtD(o.etd)||fmtD(o.submitted)||""}</b><br>Page 1 of 1</td>
+        <table style="border:2px solid #000"><tr>
+          <td style="width:22%;border-bottom:2px solid #000;padding:4px 6px;font-size:11px">Date: <b>${fmtD(o.etd)||fmtD(o.submitted)||""}</b></td>
+          <td style="width:50%;border-bottom:2px solid #000"><div class="title">BILL OF LADING</div></td>
+          <td style="width:28%;border-bottom:2px solid #000;padding:4px 6px;text-align:right;font-size:11px"><b>Page 1 of 1</b></td>
         </tr></table>
 
-        <table>
+        <table style="border:2px solid #000;border-top:0">
           <tr>
-            <td style="${cell};width:50%">
-              <span style="${lbl}">SHIP FROM</span><br>
-              <b>${(wh&&wh.name)||o.warehouseCode||""}</b><br>${(wh&&wh.address)||""}<br>
-              <span style="${lbl}">SID#:</span> ${o.warehouseCode||""} &nbsp; <span style="${lbl}">FOB:</span> &#9744;
+            <td colspan="2" style="width:50%;border-right:2px solid #000;padding:0">
+              <div class="secbar">SHIP FROM</div>
+              <div style="padding:4px 6px;min-height:78px">
+                <div class="fld">Name: <b>${(wh&&wh.name)||o.warehouseCode||""}</b></div>
+                <div class="fld">Address: ${(wh&&wh.address)||""}</div>
+                <div class="fld">City/State/Zip: </div>
+                <div class="fld">SID#: ${o.warehouseCode||""} &nbsp;&nbsp; FOB: &#9744;</div>
+              </div>
             </td>
-            <td style="${cell};width:50%">
-              <span style="${lbl}">Bill of Lading Number:</span> <b>${bolNo}</b><br>
-              <div style="text-align:center;color:#888;font-size:8px;margin:6px 0">B A R C O D E   S P A C E</div>
+            <td colspan="2" style="width:50%;padding:4px 6px">
+              <div class="fld">Bill of Lading Number: <b>${bolNo}</b></div>
+              <div class="bar">B A R &nbsp; C O D E &nbsp; S P A C E</div>
             </td>
           </tr>
           <tr>
-            <td style="${cell}">
-              <span style="${lbl}">SHIP TO</span><br>
-              <b>${(c&&c.name)||""}</b><br>${(c&&c.address)||""}<br>
-              <span style="${lbl}">CID#:</span> ${o.customerId||""} &nbsp; <span style="${lbl}">FOB:</span> &#9744;
+            <td colspan="2" style="border-right:2px solid #000;border-top:1px solid #000;padding:0">
+              <div class="secbar">SHIP TO</div>
+              <div style="padding:4px 6px;min-height:78px">
+                <div class="fld">Name: <b>${shipToName}</b> &nbsp;&nbsp; Location #: ____</div>
+                <div class="fld">Address: ${shipToAddr}</div>
+                <div class="fld">City/State/Zip: ${shipToCsz}</div>
+                <div class="fld">CID#: ${o.customerId||""} &nbsp;&nbsp; FOB: &#9744;</div>
+              </div>
             </td>
-            <td style="${cell}">
-              <span style="${lbl}">CARRIER NAME:</span> <b>${(car&&car.name)||""}</b><br>
-              <span style="${lbl}">Trailer number:</span> ______________<br>
-              <span style="${lbl}">Seal number(s):</span> ______________<br>
-              <span style="${lbl}">SCAC:</span> ${(car&&car.scac)||"____"} &nbsp; <span style="${lbl}">Pro number:</span> __________
+            <td colspan="2" style="border-top:1px solid #000;padding:4px 6px">
+              <div class="fld">CARRIER NAME: <b>${(car&&car.name)||""}</b></div>
+              <div class="fld">Trailer number: ____________</div>
+              <div class="fld">Seal number(s): ____________</div>
+              <div class="fld"><b>SCAC:</b> ${(car&&car.scac)||""}</div>
+              <div class="fld"><b>Pro number:</b> ____________</div>
             </td>
           </tr>
           <tr>
-            <td style="${cell}">
-              <span style="${lbl}">THIRD PARTY FREIGHT CHARGES BILL TO:</span><br>
-              <b>${(c&&c.name)||""}</b><br>${(c&&c.address)||""}
+            <td colspan="2" style="border-right:2px solid #000;border-top:1px solid #000;padding:0">
+              <div class="secbar">THIRD PARTY FREIGHT CHARGES BILL TO:</div>
+              <div style="padding:4px 6px;min-height:58px">
+                <div class="fld">Name: <b>${tpName}</b></div>
+                <div class="fld">Address: ${tpAddr}</div>
+                <div class="fld">City/State/Zip: ${tpCsz}</div>
+              </div>
             </td>
-            <td style="${cell}">
-              <span style="${lbl}">Freight Charge Terms:</span> (prepaid unless marked)<br>
-              Prepaid &#9745; &nbsp; Collect &#9744; &nbsp; 3rd Party &#9744;<br>
-              <span style="${lbl}">Mode:</span> ${o.shipMode||"-"} &nbsp; &#9744; Master BOL w/ attached underlying BOLs
+            <td colspan="2" style="border-top:1px solid #000;padding:4px 6px">
+              <div class="fld"><b>Freight Charge Terms:</b> (freight charges are prepaid unless marked otherwise)</div>
+              <div class="fld">Prepaid ${chk("Prepaid")} &nbsp;&nbsp; Collect ${chk("Collect")} &nbsp;&nbsp; 3rd Party ${chk("3rd Party")}</div>
+              <div class="fld">&#9744; Master Bill of Lading: with attached underlying Bills of Lading</div>
+              <div class="fld">Mode: ${o.shipMode||""}</div>
             </td>
           </tr>
+          <tr><td colspan="4" style="border-top:1px solid #000;padding:4px 6px;min-height:34px"><b style="font-size:10px">SPECIAL INSTRUCTIONS:</b> ${o.notes||""}</td></tr>
         </table>
 
-        <table style="margin-top:2px">
-          <tr><td colspan="5" style="${hd};text-align:left">CUSTOMER ORDER INFORMATION</td></tr>
+        <table style="border:2px solid #000;border-top:0">
+          <tr><td colspan="5" class="secbar">CUSTOMER ORDER INFORMATION</td></tr>
           <tr>
-            <td style="${hd}">CUSTOMER ORDER NUMBER</td>
-            <td style="${hd}"># PKGS</td>
-            <td style="${hd}">WEIGHT</td>
-            <td style="${hd}">PALLET/SLIP (Y/N)</td>
-            <td style="${hd}">ADDITIONAL SHIPPER INFO</td>
+            <td style="${hd};width:34%">CUSTOMER ORDER NUMBER</td>
+            <td style="${hd};width:12%"># PKGS</td>
+            <td style="${hd};width:14%">WEIGHT</td>
+            <td style="${hd};width:16%">PALLET/SLIP (Y/N)</td>
+            <td style="${hd};width:24%">ADDITIONAL SHIPPER INFO</td>
           </tr>
           <tr>
-            <td style="${cell};text-align:center">${o.ttsPo||o.reference||o.containerNo||""}</td>
+            <td style="${cell};text-align:center">${o.t2so||o.ttsPo||bolNo}</td>
             <td style="${cell};text-align:center">${o.plts||0}</td>
             <td style="${cell};text-align:center"></td>
             <td style="${cell};text-align:center">Y</td>
             <td style="${cell}">${o.project||""}</td>
           </tr>
+          <tr style="height:14px"><td style="${cell}"></td><td style="${cell}"></td><td style="${cell}"></td><td style="${cell}"></td><td style="${cell}"></td></tr>
           <tr>
             <td style="${cell};text-align:right;font-weight:bold">GRAND TOTAL</td>
             <td style="${cell};text-align:center;font-weight:bold">${o.plts||0}</td>
@@ -1207,8 +1279,8 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
           </tr>
         </table>
 
-        <table style="margin-top:2px">
-          <tr><td colspan="6" style="${hd};text-align:left">CARRIER INFORMATION</td></tr>
+        <table style="border:2px solid #000;border-top:0">
+          <tr><td colspan="6" class="secbar">CARRIER INFORMATION</td></tr>
           <tr>
             <td style="${hd}" colspan="2">HANDLING UNIT</td>
             <td style="${hd}" colspan="2">PACKAGE</td>
@@ -1216,10 +1288,10 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
             <td style="${hd}">COMMODITY DESCRIPTION</td>
           </tr>
           <tr>
-            <td style="${hd}">QTY</td><td style="${hd}">TYPE</td>
-            <td style="${hd}">QTY</td><td style="${hd}">TYPE</td>
-            <td style="${hd}"></td>
-            <td style="${hd}">NMFC / CLASS</td>
+            <td style="${hd};width:9%">QTY</td><td style="${hd};width:9%">TYPE</td>
+            <td style="${hd};width:9%">QTY</td><td style="${hd};width:9%">TYPE</td>
+            <td style="${hd};width:14%">H.M. (X)</td>
+            <td style="${hd}">NMFC # / CLASS</td>
           </tr>
           <tr>
             <td style="${cell};text-align:center">${o.plts||0}</td>
@@ -1230,6 +1302,7 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
             <td style="${cell}"><b>${o.sku||""}</b>${o.description?("<br>"+o.description):""}</td>
           </tr>
           ${items.map(l=>`<tr><td style="${cell};text-align:center">${l.qty}</td><td style="${cell};text-align:center">EA</td><td style="${cell}"></td><td style="${cell}"></td><td style="${cell}"></td><td style="${cell}">${l.desc}</td></tr>`).join("")}
+          <tr style="height:14px"><td style="${cell}"></td><td style="${cell}"></td><td style="${cell}"></td><td style="${cell}"></td><td style="${cell}"></td><td style="${cell}"></td></tr>
           <tr>
             <td style="${cell};text-align:right;font-weight:bold" colspan="4">GRAND TOTAL</td>
             <td style="${cell}"></td>
@@ -1237,29 +1310,45 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
           </tr>
         </table>
 
-        <table style="margin-top:2px"><tr>
-          <td style="${cell};width:50%;font-size:8px">
-            <b>Where the rate is dependent on value</b>, shippers are required to state specifically in writing the agreed or declared value of the property.<br>
-            COD Amount: $________ &nbsp; Fee Terms: Collect &#9744; Prepaid &#9744;
+        <table style="border:2px solid #000;border-top:0"><tr>
+          <td style="${cell};width:50%;font-size:8px;border-right:2px solid #000">
+            Where the rate is dependent on value, shippers are required to state specifically in writing the agreed or declared value of the property as follows:<br><br>
+            "The agreed or declared value of the property is specifically stated by the shipper to be not exceeding ______ per ______."
           </td>
-          <td style="${cell};width:50%;font-size:8px">
-            <b>NOTE:</b> Liability limitation for loss or damage may apply. See 49 U.S.C. 14706(c)(1)(A) and (B).<br>
-            Received, subject to the applicable rates, classifications and rules.
+          <td style="${cell};width:50%;font-size:9px">
+            <b>COD Amount: $______________</b><br>
+            Fee Terms: Collect &#9744; &nbsp; Prepaid &#9744;<br>
+            Customer check acceptable: &#9744;
           </td>
         </tr></table>
 
-        <table style="margin-top:2px"><tr>
-          <td style="${cell};width:50%">
-            <span style="${lbl}">SHIPPER SIGNATURE / DATE</span><br><br>
-            ______________________________<br>
-            <span style="font-size:7px">This is to certify that the above named materials are properly classified, packaged, marked and labeled, and are in proper condition for transportation per DOT regulations.</span>
+        <table style="border:2px solid #000;border-top:0"><tr>
+          <td style="${cell};width:50%;font-size:7px;border-right:2px solid #000">
+            <b>NOTE Liability Limitation for loss or damage in this shipment may be applicable. See 49 U.S.C. - 14706(c)(1)(A) and (B).</b><br>
+            RECEIVED, subject to individually determined rates or contracts that have been agreed upon in writing between the carrier and shipper, if applicable, otherwise to the rates, classifications and rules that have been established by the carrier and are available to the shipper, on request.
           </td>
-          <td style="${cell};width:50%">
-            <span style="${lbl}">CARRIER SIGNATURE / PICKUP DATE</span><br><br>
-            ______________________________<br>
-            <span style="font-size:7px">Carrier acknowledges receipt of packages and required placards. Property described above is received in good order except as noted.</span>
+          <td style="${cell};width:50%;font-size:8px">
+            The carrier shall not make delivery of this shipment without payment of freight and all other lawful charges.<br><br>
+            ______________________________ <b>Shipper Signature</b>
           </td>
         </tr></table>
+
+        <table style="border:2px solid #000;border-top:0"><tr>
+          <td style="${cell};width:40%;border-right:1px solid #000">
+            <b style="font-size:10px">SHIPPER SIGNATURE / DATE</b><br>
+            <span style="font-size:6.5px">This is to certify that the above named materials are properly classified, packaged, marked and labeled, and are in proper condition for transportation according to the applicable regulations of the DOT.</span><br><br>
+            ______________________________
+          </td>
+          <td style="${cell};width:24%;border-right:1px solid #000;font-size:8px">
+            <b>Trailer Loaded:</b><br>&#9744; By Shipper<br>&#9744; By Driver
+          </td>
+          <td style="${cell};width:36%;font-size:8px">
+            <b>CARRIER SIGNATURE / PICKUP DATE</b><br>
+            <span style="font-size:6.5px">Carrier acknowledges receipt of packages and required placards. Property described above is received in good order except as noted.</span><br><br>
+            ______________________________
+          </td>
+        </tr></table>
+        <div style="text-align:center;margin-top:6px;font-size:11px"><b>Drivers License#:</b> ______________ &nbsp;&nbsp; <b>Drivers Name (Print):</b> ______________</div>
       </body></html>`;
       const blob=new Blob([doc],{type:"text/html"});
       const url=URL.createObjectURL(blob);
@@ -1277,15 +1366,15 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
         return `<div style="border:1px solid #ccc;border-radius:8px;padding:16px 20px;margin-bottom:14px;page-break-inside:avoid">
           <div style="display:flex;justify-content:space-between;border-bottom:2px solid #333;padding-bottom:8px;margin-bottom:10px">
             <div><strong style="font-size:18px">PICKING TICKET</strong><br><span style="color:#666;font-size:12px">${o.warehouseCode||""}</span></div>
-            <div style="text-align:right"><strong style="font-size:16px;font-family:monospace">${o.containerNo||""}</strong><br><span style="color:#666;font-size:12px">${fmtD(o.etd)||""}</span></div>
+            <div style="text-align:right"><strong style="font-size:30px;font-family:monospace">${o.containerNo||""}</strong><br><span style="color:#666;font-size:12px">${fmtD(o.etd)||""}</span></div>
           </div>
           <table style="width:100%;font-size:13px;border-collapse:collapse">
             <tr><td style="padding:3px 0;color:#666;width:130px">Customer</td><td style="padding:3px 0;font-weight:bold">${(c&&c.name)||""}</td></tr>
             <tr><td style="padding:3px 0;color:#666">Project</td><td style="padding:3px 0">${o.project||"-"}</td></tr>
             <tr><td style="padding:3px 0;color:#666;width:130px">SKU</td><td style="padding:3px 0;font-weight:bold">${o.sku||""}</td></tr>
             <tr><td style="padding:3px 0;color:#666">Description</td><td style="padding:3px 0">${o.description||""}</td></tr>
-            <tr><td style="padding:3px 0;color:#666">Quantity</td><td style="padding:3px 0;font-weight:bold">${o.plts||0} pallets / ${num(o.units)} units</td></tr>
-            <tr><td style="padding:3px 0;color:#666">Reference</td><td style="padding:3px 0">${o.reference||"-"}</td></tr>
+            <tr><td style="padding:6px 0;color:#666;vertical-align:middle">Quantity</td><td style="padding:6px 0;font-weight:bold;font-size:26px">${o.plts||0} plts / ${num(o.units)} units</td></tr>
+            <tr><td style="padding:6px 0;color:#666;vertical-align:middle">Reference #</td><td style="padding:6px 0;font-weight:bold;font-size:24px;font-family:monospace">${o.reference||"-"}</td></tr>
             <tr><td style="padding:3px 0;color:#666">Shipping</td><td style="padding:3px 0">${o.shipMode||"-"}</td></tr>
           </table>
           <div style="margin-top:14px;border-top:1px dashed #ccc;padding-top:10px;font-size:12px;color:#666">Picked by: _______________&nbsp;&nbsp;&nbsp;Date: ___________&nbsp;&nbsp;&nbsp;Checked: ___________</div>
@@ -1357,6 +1446,7 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
                       {mayEdit&&!orderInvoiced(o)&&<Btn sm v="ghost" onClick={()=>{setForm({...o,origPlts:o.plts,origUnits:o.units});setModal("edit");}} style={{color:C.amber,borderColor:C.amber+"55"}}>Edit</Btn>}
                       {mayAdd&&<Btn sm v="ghost" onClick={()=>duplicateOrder(o)} style={{color:C.blue,borderColor:C.blue+"55"}}>Duplicate</Btn>}
                       <Btn sm v="ghost" onClick={()=>printBOL(o)} style={{color:C.purple,borderColor:C.purple+"55"}}>BOL</Btn>
+                      {mayAdd&&<Btn sm v="ghost" onClick={()=>setFileModal(o.id)} style={{color:C.blue,borderColor:C.blue+"55"}}>Files{((o.attachments&&o.attachments.length)||o.customBOL)?" ●":""}</Btn>}
                       {mayFull&&o.status==="Shipped"&&!orderInvoiced(o)&&<Btn sm v="ghost" onClick={()=>unshipOrder(o)} style={{color:C.orange,borderColor:C.orange+"55"}}>Undo Ship</Btn>}
                       {mayFull&&o.status!=="Shipped"&&!orderInvoiced(o)&&<Btn sm v="danger" onClick={()=>voidOrder(o)}>Void</Btn>}
                       {orderInvoiced(o)&&<Tag label="🔒 Invoiced" color="purple"/>}
@@ -1398,13 +1488,14 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
             <div style={{marginBottom:16}}>
               <div style={s.sec}>Select Inventory Items to Ship</div>
               {availLedger.length===0&&<div style={{padding:"16px",textAlign:"center",color:C.muted,fontSize:13}}>No available inventory for this customer.</div>}
+              {availLedger.length>0&&<input value={invFilter} onChange={e=>setInvFilter(e.target.value)} placeholder="Type to filter by container #, SKU, description…" style={{...s.input,marginBottom:8}}/>}
               <div style={{border:`1px solid ${C.border}`,borderRadius:8,overflow:"hidden"}}>
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
                   <thead><tr style={{background:C.bg}}>{["","Container","SKU","Location","Balance","Ship Plts","Ship Units"].map(h=><th key={h} style={{...s.th,padding:"7px 10px"}}>{h}</th>)}</tr></thead>
                   <tbody>
-                    {availLedger.map((l,li)=>{const b=balOf(l);const q=pick[l.id]||{};const on=!!q.sel;
-                      const sameContainer=availLedger.filter(x=>x.containerNo===l.containerNo);
-                      const firstOfContainer=availLedger.findIndex(x=>x.containerNo===l.containerNo)===li;
+                    {availFiltered.map((l,li)=>{const b=balOf(l);const q=pick[l.id]||{};const on=!!q.sel;
+                      const sameContainer=availFiltered.filter(x=>x.containerNo===l.containerNo);
+                      const firstOfContainer=availFiltered.findIndex(x=>x.containerNo===l.containerNo)===li;
                       const multiSku=sameContainer.length>1;
                       return(
                       <tr key={l.id} style={{background:on?C.tealD:"transparent",borderTop:firstOfContainer&&li>0?`2px solid ${C.border}`:undefined}}>
@@ -1433,11 +1524,12 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
           {!multiMode&&form.customerId&&availLedger.length>0&&(
             <div style={{marginBottom:16}}>
               <label style={s.label}>Ship From Inventory *</label>
+              <input value={invFilter} onChange={e=>setInvFilter(e.target.value)} placeholder="Type to filter by container #, SKU, description…" style={{...s.input,marginBottom:6}}/>
               <select value={form.ledgerId} onChange={e=>{const l=ledger.find(x=>x.id===e.target.value);if(l){const b=balOf(l);const fc=(l.loadingType||"").toLowerCase().includes("full container");setForm(f=>({...f,ledgerId:l.id,containerNo:l.containerNo,sku:l.sku,description:l.description,warehouseCode:l.warehouseCode,project:l.project||"",plts:fc?b.plts:f.plts,units:fc?b.units:f.units}));}else{setForm(f=>({...f,ledgerId:"",containerNo:"",sku:"",description:"",warehouseCode:"",project:""}));}}} style={s.input}>
                 <option value="">- select inventory item -</option>
-                {availLedger.map(l=>{const b=balOf(l);const fc=(l.loadingType||"").toLowerCase().includes("full container");return <option key={l.id} value={l.id}>{l.containerNo} | {l.sku} | bal {b.plts}plt / {num(b.units)}u{fc?" | FULL CONTAINER":""}</option>;})}
+                {availFiltered.map(l=>{const b=balOf(l);const fc=(l.loadingType||"").toLowerCase().includes("full container");return <option key={l.id} value={l.id}>{l.containerNo} | {l.sku} | bal {b.plts}plt / {num(b.units)}u{fc?" | FULL CONTAINER":""}</option>;})}
               </select>
-              <div style={{fontSize:11,color:C.muted,marginTop:5}}>Required. Stock is deducted from this item when the order ships.</div>
+              <div style={{fontSize:11,color:C.muted,marginTop:5}}>Required. Stock is deducted from this item when the order ships.{invFilter.trim()&&` Showing ${availFiltered.length} of ${availLedger.length}.`}</div>
             </div>
           )}
           {!multiMode&&form.ledgerId&&(()=>{const l=ledger.find(x=>x.id===form.ledgerId);if(!l)return null;const b=balOf(l);const fc=(l.loadingType||"").toLowerCase().includes("full container");return(
@@ -1455,16 +1547,45 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
             <TI label={fcLock?"Units * (full container)":"Units *"} type="number" value={form.units} readOnly={fcLock} onChange={e=>fcLock?null:setForm(f=>({...f,units:e.target.value}))} style={fcLock?{opacity:0.6,cursor:"not-allowed"}:{}}/>
             <TS label="Shipping Mode" value={form.shipMode} onChange={e=>setForm(f=>({...f,shipMode:e.target.value}))}>{SHIP_MODES.map(m=><option key={m}>{m}</option>)}</TS>
             <TS label="Carrier" value={form.carrierId} onChange={e=>setForm(f=>({...f,carrierId:e.target.value}))}><option value="">-</option>{carriers.filter(c=>c.active!==false).map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</TS>
-            <TI label="Reference" value={form.reference} onChange={e=>setForm(f=>({...f,reference:e.target.value}))}/>
+            <TI label="T2 SO# *" value={form.t2so} onChange={e=>setForm(f=>({...f,t2so:e.target.value}))}/>
+            <TI label="Reference # * (blank = T2 SO#)" value={form.reference} onChange={e=>setForm(f=>({...f,reference:e.target.value}))}/>
             <TI label="Notes" value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))}/>
           </div>
           );})()}
+
+          {!multiMode&&(
+          <>
+            <div style={s.sec}>Ship To (prints on BOL)</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginBottom:16}}>
+              <TI label="Ship To Name" value={form.shipToName} onChange={e=>setForm(f=>({...f,shipToName:e.target.value}))} placeholder="(blank = customer name)"/>
+              <TI label="Ship To Address" value={form.shipToAddress} onChange={e=>setForm(f=>({...f,shipToAddress:e.target.value}))}/>
+              <TI label="City / State / Zip" value={form.shipToCityStateZip} onChange={e=>setForm(f=>({...f,shipToCityStateZip:e.target.value}))}/>
+            </div>
+            <div style={s.sec}>Freight Charge Terms (prints on BOL)</div>
+            <div style={{display:"flex",gap:16,marginBottom:12,flexWrap:"wrap"}}>
+              {["Prepaid","Collect","3rd Party"].map(ft=>(
+                <label key={ft} style={{display:"flex",alignItems:"center",gap:6,fontSize:13,cursor:"pointer",color:form.freightTerms===ft?C.amber:C.muted,fontWeight:form.freightTerms===ft?700:400}}>
+                  <input type="radio" name="freightTerms" checked={form.freightTerms===ft} onChange={()=>setForm(f=>({...f,freightTerms:ft}))}/>{ft}
+                </label>
+              ))}
+            </div>
+            {form.freightTerms==="3rd Party"&&(
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginBottom:16,background:C.bg,padding:12,borderRadius:8,border:`1px solid ${C.border}`}}>
+                <TI label="3rd Party Name" value={form.tpName} onChange={e=>setForm(f=>({...f,tpName:e.target.value}))}/>
+                <TI label="3rd Party Address" value={form.tpAddress} onChange={e=>setForm(f=>({...f,tpAddress:e.target.value}))}/>
+                <TI label="City / State / Zip" value={form.tpCityStateZip} onChange={e=>setForm(f=>({...f,tpCityStateZip:e.target.value}))}/>
+              </div>
+            )}
+          </>
+          )}
+
           {multiMode&&(
           <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12,marginBottom:16}}>
             <TI label="ETD *" type="date" value={form.etd} onChange={e=>setForm(f=>({...f,etd:e.target.value}))}/>
             <TS label="Shipping Mode" value={form.shipMode} onChange={e=>setForm(f=>({...f,shipMode:e.target.value}))}>{SHIP_MODES.map(m=><option key={m}>{m}</option>)}</TS>
             <TS label="Carrier" value={form.carrierId} onChange={e=>setForm(f=>({...f,carrierId:e.target.value}))}><option value="">-</option>{carriers.filter(c=>c.active!==false).map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</TS>
-            <TI label="Reference (shared)" value={form.reference} onChange={e=>setForm(f=>({...f,reference:e.target.value}))}/>
+            <TI label="T2 SO# * (shared)" value={form.t2so} onChange={e=>setForm(f=>({...f,t2so:e.target.value}))}/>
+            <TI label="Reference # (shared, blank = T2 SO#)" value={form.reference} onChange={e=>setForm(f=>({...f,reference:e.target.value}))}/>
             <TI label="Notes" value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))}/>
           </div>
           )}
@@ -1516,9 +1637,83 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
             <TI label="Ship Date" type="date" value={shipDate} onChange={e=>setShipDate(e.target.value)} autoFocus/>
             <div style={{fontSize:11,color:C.muted,marginTop:6}}>Defaults to today. This is the date the outbound leaves and is recorded in inventory movements.</div>
           </div>
+          {(()=>{
+            const le=shipModal.ledgerId?ledger.find(x=>x.id===shipModal.ledgerId):resolveLedger(shipModal);
+            const lt=(le&&le.loadingType)||shipModal.loadingType;
+            const items=extraItemsFor(lt);
+            const rates=ratesForCust(shipModal.customerId,le&&le.ibDate)||{};
+            if(items.length===0)return <div style={{fontSize:12,color:C.muted,marginBottom:16}}>No extra billable items for this loading type ({lt||"-"}).</div>;
+            const extTotal=items.reduce((a,it)=>a+Number(shipExtras[it.key]||0)*Number(rates[it.key]||0),0);
+            return(
+              <div style={{marginBottom:16}}>
+                <div style={s.sec}>Extra Items (billed) — {lt&&lt.toUpperCase().startsWith("P2P")?"P2P":lt&&lt.toUpperCase().startsWith("F2P")?"F2P":""}</div>
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                  <thead><tr style={{background:C.bg}}>{["Item","Rate","Qty","Amount"].map(h=><th key={h} style={{...s.th,padding:"6px 8px"}}>{h}</th>)}</tr></thead>
+                  <tbody>
+                    {items.map(it=>{const r=Number(rates[it.key]||0);const q=Number(shipExtras[it.key]||0);return(
+                      <tr key={it.key}>
+                        <td style={{...s.td,padding:"5px 8px"}}>{it.label}</td>
+                        <td style={{...s.td,padding:"5px 8px",color:C.muted}}>{money(r)}</td>
+                        <td style={{...s.td,padding:"5px 8px"}}><input type="number" min="0" value={shipExtras[it.key]||""} onChange={e=>setShipExtras(p=>({...p,[it.key]:e.target.value}))} style={{...s.input,width:70,padding:"4px 6px"}}/></td>
+                        <td style={{...s.td,padding:"5px 8px",fontWeight:700,color:C.green}}>{money(q*r)}</td>
+                      </tr>
+                    );})}
+                  </tbody>
+                </table>
+                <div style={{textAlign:"right",fontSize:12,marginTop:6}}>Extra items total: <strong style={{color:C.green}}>{money(extTotal)}</strong></div>
+                <div style={{fontSize:11,color:C.muted,marginTop:4}}>These are added to this order's billing when it ships.</div>
+              </div>
+            );
+          })()}
           <div style={{display:"flex",gap:8}}><Btn v="success" onClick={()=>{if(shipOrder(shipModal,shipDate))setShipModal(null);}}>Confirm Ship</Btn><Btn onClick={()=>setShipModal(null)}>Cancel</Btn></div>
         </Modal>
       )}
+
+      {fileModal&&(()=>{
+        const o=orders.find(x=>x.id===fileModal); if(!o)return null;
+        const photos=o.attachments||[];
+        const setOrderFiles=(updater)=>setOrders(p=>p.map(x=>x.id===o.id?updater(x):x));
+        return(
+        <Modal title={`Files & BOL — ${o.containerNo}`} onClose={()=>setFileModal(null)} wide>
+          <div style={s.sec}>Custom BOL (replaces the system BOL when present)</div>
+          <div style={{marginBottom:18}}>
+            {o.customBOL?(
+              <div style={{display:"flex",alignItems:"center",gap:12,background:C.input,borderRadius:8,padding:"10px 14px"}}>
+                <span style={{fontSize:13}}>📄 {o.customBOL.name}</span>
+                <a href={o.customBOL.dataUrl} download={o.customBOL.name} style={{color:C.blue,fontSize:12}}>Download</a>
+                <Btn sm v="ghost" onClick={()=>printBOL(o)} style={{color:C.purple,borderColor:C.purple+"55"}}>Print</Btn>
+                {mayFull&&<Btn sm v="danger" onClick={()=>{if(window.confirm("Remove the custom BOL? The system BOL will be used again."))setOrderFiles(x=>({...x,customBOL:null}));}}>Remove</Btn>}
+              </div>
+            ):(
+              <div onClick={()=>document.getElementById("cbol-input")?.click()} onDragOver={e=>e.preventDefault()}
+                onDrop={e=>{e.preventDefault();const f=e.dataTransfer.files&&e.dataTransfer.files[0];if(f){if(f.size>3*1024*1024){alert("Custom BOL is too large (over 3 MB).");return;}const rd=new FileReader();rd.onload=ev=>{setOrderFiles(x=>({...x,customBOL:{name:f.name,dataUrl:ev.target.result,type:f.type}}));};rd.readAsDataURL(f);}}}
+                style={{border:`2px dashed ${C.border}`,borderRadius:8,padding:"14px",textAlign:"center",color:C.muted,fontSize:12,cursor:"pointer",background:C.bg}}>
+                Upload a custom BOL (PDF or image) — drag &amp; drop or click. It will print instead of the system BOL.
+              </div>
+            )}
+            <input id="cbol-input" type="file" accept="application/pdf,image/*" style={{display:"none"}} onChange={e=>{const f=e.target.files&&e.target.files[0];if(f){if(f.size>3*1024*1024){alert("Custom BOL is too large (over 3 MB).");e.target.value="";return;}const rd=new FileReader();rd.onload=ev=>{setOrderFiles(x=>({...x,customBOL:{name:f.name,dataUrl:ev.target.result,type:f.type}}));};rd.readAsDataURL(f);}e.target.value="";}}/>
+          </div>
+
+          <div style={s.sec}>Photos / Attachments</div>
+          {photos.length>0?(
+            <div style={{display:"flex",flexWrap:"wrap",gap:12,marginBottom:12}}>
+              {photos.map((f,i)=>(
+                <div key={i} style={{position:"relative"}}>
+                  <a href={f.dataUrl} download={f.name}>{f.type&&f.type.startsWith("image/")?<img src={f.dataUrl} alt={f.name} style={{maxWidth:160,maxHeight:160,borderRadius:8,border:`1px solid ${C.border}`}}/>:<div style={{padding:12,border:`1px solid ${C.border}`,borderRadius:8,color:C.teal}}>{f.name}</div>}</a>
+                  {mayFull&&<span onClick={()=>{if(window.confirm("Delete this photo?"))setOrderFiles(x=>({...x,attachments:(x.attachments||[]).filter((_,z)=>z!==i)}));}} style={{position:"absolute",top:4,right:4,background:"rgba(0,0,0,0.65)",color:"#fff",borderRadius:"50%",width:22,height:22,textAlign:"center",lineHeight:"22px",cursor:"pointer"}}>×</span>}
+                </div>
+              ))}
+            </div>
+          ):<div style={{color:C.muted,fontSize:12,marginBottom:12}}>No photos yet.</div>}
+          <div onClick={()=>document.getElementById("oatt-input")?.click()} onDragOver={e=>e.preventDefault()}
+            onDrop={e=>{e.preventDefault();processAttachments(e.dataTransfer.files,f=>setOrderFiles(x=>({...x,attachments:[...(x.attachments||[]),f]})));}}
+            style={{border:`2px dashed ${C.border}`,borderRadius:8,padding:"14px",textAlign:"center",color:C.muted,fontSize:12,cursor:"pointer",background:C.bg}}>
+            + Add photos — drag &amp; drop or click (from computer or a Teams chat)
+          </div>
+          <input id="oatt-input" type="file" multiple accept="image/*" style={{display:"none"}} onChange={e=>{processAttachments(e.target.files,f=>setOrderFiles(x=>({...x,attachments:[...(x.attachments||[]),f]})));e.target.value="";}}/>
+          <div style={{marginTop:16}}><Btn onClick={()=>setFileModal(null)}>Done</Btn></div>
+        </Modal>
+      );})()}
 
       {freightModal&&(
         <Modal title="Freight Cost — Confirm Order" onClose={()=>{setFreightModal(null);setFreightFee("");}}>
@@ -2049,7 +2244,7 @@ function RateCardModal({customer,setCustomers,onClose,isAdmin,mayFull=false}){
       {sec:"F2F Charges",color:C.blue,fields:[["f2fUnload","Unloading"],["f2fSort","Sorting"],["f2fHandling","Handling"],["f2fReload","Reloading"]]},
       {sec:"F2P Charges",color:C.purple,fields:[["f2pUnload","Unloading"],["f2pPalletize","Palletizing"],["f2pPallet","Pallet Fee"],["f2pWrap","Wrapping"],["f2pLabel","Labeling (extra)"],["f2pAirbag","Airbag (extra)"]]},
       {sec:"P2P Charges",color:C.teal,fields:[["p2pForklift","Forklift"],["p2pStorage","Storage"],["p2pLoading","Loading"],["p2pLabel","Labeling (extra)"],["p2pAirbag","Airbag (extra)"]]},
-      {sec:"Other",color:C.orange,fields:[["handlingFee","Handling Fee"],["shippingFee","Shipping Fee"]]},
+      {sec:"Other",color:C.orange,fields:[["handlingFee","Handling Fee"],["shippingFee","Shipping Fee"],["documentFee","Document Fee"]]},
     ];
     return(
       <Modal title={`Quote Sheet — ${customer.name}`} onClose={()=>setEditing(null)} wide>
@@ -2463,6 +2658,11 @@ function BillingModule({orders,ledger,customers,invoices,setInvoices,isAdmin,per
     if(r.shippingFee>0){
       const key=`OBS-${o.id}`;
       if(!billedKeys.has(key))charges.push({key,customerId:o.customerId,group:"Outbound",date:o.shippedDate,container:o.containerNo,desc:`Shipping fee — ${o.containerNo}`,qty:1,rate:r.shippingFee,amount:r.shippingFee});
+    }
+    // Document fee — one per outbound shipment
+    if(r.documentFee>0){
+      const key=`DOC-${o.id}`;
+      if(!billedKeys.has(key))charges.push({key,customerId:o.customerId,group:"Outbound",date:o.shippedDate,container:o.containerNo,desc:`Document fee — ${o.containerNo}`,qty:1,rate:r.documentFee,amount:r.documentFee});
     }
     // MKT (market-rate) shipping fee entered on the order itself
     const mkt=Number(o.mktShipFee||0);
