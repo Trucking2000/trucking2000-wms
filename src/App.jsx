@@ -43,6 +43,32 @@ const num=(n)=>Number(n||0).toLocaleString("en-US");
 let _id=Math.floor(Math.random()*1e6);
 const uid=()=>(Date.now().toString(36)+"-"+(++_id).toString(36)+"-"+Math.random().toString(36).slice(2,7));
 
+// Compress image files to small JPEG data URLs; calls onEach({name,dataUrl,type}) per file.
+function processAttachments(fileList,onEach){
+  Array.from(fileList||[]).forEach(file=>{
+    if(file.type&&file.type.startsWith("image/")){
+      const reader=new FileReader();
+      reader.onload=e=>{
+        const img=new Image();
+        img.onload=()=>{
+          const maxDim=1024; let {width,height}=img;
+          if(width>maxDim||height>maxDim){const r=Math.min(maxDim/width,maxDim/height);width=Math.round(width*r);height=Math.round(height*r);}
+          const cv=document.createElement("canvas");cv.width=width;cv.height=height;
+          cv.getContext("2d").drawImage(img,0,0,width,height);
+          onEach({name:file.name,dataUrl:cv.toDataURL("image/jpeg",0.55),type:"image/jpeg"});
+        };
+        img.src=e.target.result;
+      };
+      reader.readAsDataURL(file);
+    } else {
+      if(file.size>1.5*1024*1024){alert("\""+file.name+"\" is too large to attach (over 1.5 MB). Please attach images or small files.");return;}
+      const reader=new FileReader();
+      reader.onload=e=>onEach({name:file.name,dataUrl:e.target.result,type:file.type||"application/octet-stream"});
+      reader.readAsDataURL(file);
+    }
+  });
+}
+
 // -- Constants ----------------------------------------------
 const CONTAINER_TYPES=["40HQ","40GP","20GP","45HQ","53FT","Loose Cargo","LCL","Other"];
 const LOADING_TYPES=["F2F - Floor to Floor","F2P - Floor to Pallet","P2P - Pallet to Pallet","Full Container Storage"];
@@ -344,6 +370,8 @@ function Inbound({orders,setOrders,customers,warehouses,isAdmin,perm="full",logA
       // For F2F / F2P / P2P lines, pallets are required (> 0)
       const badPlt=valid.find(l=>needsPallets(l.loadingType)&&!(Number(l.plts)>0));
       if(badPlt){alert("Pallets are required for "+(badPlt.loadingType||"this loading type")+" (container "+badPlt.containerNo+"). Enter the pallet count.");return;}
+      const noPo=valid.find(l=>!(l.ttsPo&&String(l.ttsPo).trim()));
+      if(noPo){alert("T2 PO# is required (container "+noPo.containerNo+").");return;}
       const batch="B"+uid();
       const newOrders=valid.map(l=>({
         type:"IN",submitted:form.submitted,eta:form.eta,etd:"",customerId:form.customerId,project:form.project,warehouseCode:form.warehouseCode,
@@ -357,6 +385,8 @@ function Inbound({orders,setOrders,customers,warehouses,isAdmin,perm="full",logA
     } else {
       if(!form.warehouseCode){alert("Location (warehouse) is required.");return;}
       if(needsPallets(form.loadingType)&&!(Number(form.plts)>0)){alert("Pallets are required for "+(form.loadingType||"this loading type")+".");return;}
+      // T2 PO# is required only when creating a NEW shipment, not when editing an
+      // existing one — so old records without a PO# can still be edited freely.
       const updated={...form,plts:Number(form.plts||0),units:Number(form.units||0)};
       setOrders(p=>p.map(o=>o.id===form.id?updated:o));
       if(updated.status==="Received"&&updated.ledgerId){
@@ -709,7 +739,7 @@ function Inbound({orders,setOrders,customers,warehouses,isAdmin,perm="full",logA
                       <TI label="Container # *" value={ln.containerNo} onChange={e=>setForm(f=>{const a=[...f.lines];a[idx]={...a[idx],containerNo:e.target.value};return{...f,lines:a};})}/>
                       <TS label="Size" value={ln.cntrSize} onChange={e=>setForm(f=>{const a=[...f.lines];a[idx]={...a[idx],cntrSize:e.target.value};return{...f,lines:a};})}>{CONTAINER_TYPES.map(t=><option key={t}>{t}</option>)}</TS>
                       <TS label="Loading Type" value={ln.loadingType} onChange={e=>setForm(f=>{const a=[...f.lines];a[idx]={...a[idx],loadingType:e.target.value};return{...f,lines:a};})}>{LOADING_TYPES.map(t=><option key={t}>{t}</option>)}</TS>
-                      <TI label="T2 PO#" value={ln.ttsPo} onChange={e=>setForm(f=>{const a=[...f.lines];a[idx]={...a[idx],ttsPo:e.target.value};return{...f,lines:a};})}/>
+                      <TI label="T2 PO# *" value={ln.ttsPo} onChange={e=>setForm(f=>{const a=[...f.lines];a[idx]={...a[idx],ttsPo:e.target.value};return{...f,lines:a};})}/>
                       <TI label="SKU" value={ln.sku} onChange={e=>setForm(f=>{const a=[...f.lines];a[idx]={...a[idx],sku:e.target.value};return{...f,lines:a};})}/>
                       <TI label="Description" value={ln.description} onChange={e=>setForm(f=>{const a=[...f.lines];a[idx]={...a[idx],description:e.target.value};return{...f,lines:a};})}/>
                       <TI label={needsPallets(ln.loadingType)?"Pallets *":"Pallets"} type="number" value={ln.plts} onChange={e=>setForm(f=>{const a=[...f.lines];a[idx]={...a[idx],plts:e.target.value};return{...f,lines:a};})}/>
@@ -731,7 +761,7 @@ function Inbound({orders,setOrders,customers,warehouses,isAdmin,perm="full",logA
               <TI label="Pallets" type="number" value={form.plts} onChange={e=>setForm(f=>({...f,plts:e.target.value}))}/>
               <TI label="Units" type="number" value={form.units} onChange={e=>setForm(f=>({...f,units:e.target.value}))}/>
               <TI label="Reference" value={form.reference} onChange={e=>setForm(f=>({...f,reference:e.target.value}))}/>
-              <TI label="T2 PO#" value={form.ttsPo} onChange={e=>setForm(f=>({...f,ttsPo:e.target.value}))}/>
+              <TI label="T2 PO# *" value={form.ttsPo} onChange={e=>setForm(f=>({...f,ttsPo:e.target.value}))}/>
             </div>
           )}
           <div style={{display:"flex",gap:8}}><Btn v="primary" onClick={save}>Save Order</Btn><Btn v="ghost" onClick={saveAsTemplate} style={{color:C.teal,borderColor:C.teal+"55"}}>Save as Template</Btn><Btn onClick={()=>setModal(null)}>Cancel</Btn></div>
@@ -855,7 +885,17 @@ function Inbound({orders,setOrders,customers,warehouses,isAdmin,perm="full",logA
               ))}
             </div>
           )}
-          {mayFull&&(attView.files||[]).length>1&&<div style={{marginTop:16}}><Btn sm v="danger" onClick={()=>{
+          {mayAdd&&(
+            <div style={{marginTop:16}}>
+              <div onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();processAttachments(e.dataTransfer.files,f=>{setLedger(p=>p.map(x=>x.id===attView.ledgerId?{...x,attachments:[...(x.attachments||[]),f]}:x));setAttView(v=>v?{...v,files:[...(v.files||[]),f]}:v);});logActivity&&logActivity("Inventory attachment added",attView.containerNo,"","");}}
+                onClick={()=>document.getElementById("add-file-inb")?.click()}
+                style={{border:`2px dashed ${C.border}`,borderRadius:8,padding:"14px",textAlign:"center",color:C.muted,fontSize:12,cursor:"pointer",background:C.bg}}>
+                + Add more photos — drag &amp; drop or click to choose (from computer or a Teams chat)
+              </div>
+              <input id="add-file-inb" type="file" multiple accept="image/*" style={{display:"none"}} onChange={e=>{processAttachments(e.target.files,f=>{setLedger(p=>p.map(x=>x.id===attView.ledgerId?{...x,attachments:[...(x.attachments||[]),f]}:x));setAttView(v=>v?{...v,files:[...(v.files||[]),f]}:v);});logActivity&&logActivity("Inventory attachment added",attView.containerNo,"","");e.target.value="";}}/>
+            </div>
+          )}
+          {mayFull&&(attView.files||[]).length>1&&<div style={{marginTop:12}}><Btn sm v="danger" onClick={()=>{
             if(!window.confirm(`Delete ALL ${attView.files.length} attachments for ${attView.containerNo}? This cannot be undone.`))return;
             setLedger(p=>p.map(x=>x.id===attView.ledgerId?{...x,attachments:[]}:x));
             logActivity&&logActivity("Inventory attachments cleared",attView.containerNo,"","");
@@ -1577,6 +1617,7 @@ function History({orders,customers,warehouses}){
 // ============================================================
 function InventoryLedger({ledger,setLedger,orders=[],customers,warehouses,isAdmin,perm="full",logActivity}){
   const mayFull=isAdmin||canDelete(perm);
+  const mayAdd=isAdmin||canAdd(perm);
   const[filterWh,setFilterWh]=useState("");
   const[filterCust,setFilterCust]=useState("");
   const[search,setSearch]=useState("");
@@ -1761,7 +1802,17 @@ function InventoryLedger({ledger,setLedger,orders=[],customers,warehouses,isAdmi
               ))}
             </div>
           )}
-          {mayFull&&(attView.files||[]).length>1&&<div style={{marginTop:16}}><Btn sm v="danger" onClick={()=>{
+          {mayAdd&&(
+            <div style={{marginTop:16}}>
+              <div onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();processAttachments(e.dataTransfer.files,f=>{setLedger(p=>p.map(x=>x.id===attView.ledgerId?{...x,attachments:[...(x.attachments||[]),f]}:x));setAttView(v=>v?{...v,files:[...(v.files||[]),f]}:v);});logActivity&&logActivity("Inventory attachment added",attView.containerNo,"","");}}
+                onClick={()=>document.getElementById("add-file-inv")?.click()}
+                style={{border:`2px dashed ${C.border}`,borderRadius:8,padding:"14px",textAlign:"center",color:C.muted,fontSize:12,cursor:"pointer",background:C.bg}}>
+                + Add more photos — drag &amp; drop or click to choose (from computer or a Teams chat)
+              </div>
+              <input id="add-file-inv" type="file" multiple accept="image/*" style={{display:"none"}} onChange={e=>{processAttachments(e.target.files,f=>{setLedger(p=>p.map(x=>x.id===attView.ledgerId?{...x,attachments:[...(x.attachments||[]),f]}:x));setAttView(v=>v?{...v,files:[...(v.files||[]),f]}:v);});logActivity&&logActivity("Inventory attachment added",attView.containerNo,"","");e.target.value="";}}/>
+            </div>
+          )}
+          {mayFull&&(attView.files||[]).length>1&&<div style={{marginTop:12}}><Btn sm v="danger" onClick={()=>{
             if(!window.confirm(`Delete ALL ${attView.files.length} attachments for ${attView.containerNo}? This cannot be undone.`))return;
             setLedger(p=>p.map(x=>x.id===attView.ledgerId?{...x,attachments:[]}:x));
             logActivity&&logActivity("Inventory attachments cleared",attView.containerNo,"","");
