@@ -77,7 +77,7 @@ const BILLING_TERMS=["Net 15","Net 30","Net 45","Net 60","Due on receipt","Prepa
 const CUST_ST=["Active","Suspended","Disabled"];
 const SHIP_MODES=["FTL","LTL","Parcel","LTL/Direct","Pickup"];
 
-const emptyRC=()=>({freeDays:0,storagePerPallet:0,storagePerContainer:0,storagePerCarton:0,storagePerPiece:0,f2fUnload:0,f2fSort:0,f2fHandling:0,f2fReload:0,f2pUnload:0,f2pPalletize:0,f2pPallet:0,f2pWrap:0,f2pLabel:0,f2pAirbag:0,p2pForklift:0,p2pStorage:0,p2pLoading:0,p2pLabel:0,p2pAirbag:0,handlingFee:0,shippingFee:0,documentFee:0});
+const emptyRC=()=>({freeDays:0,storagePerPallet:0,storagePerContainer:0,storagePerCarton:0,storagePerPiece:0,f2fUnload:0,f2fSort:0,f2fHandling:0,f2fReload:0,f2pUnload:0,f2pPalletize:0,f2pPallet:0,f2pWrap:0,f2pLabel:0,f2pAirbag:0,p2pForklift:0,p2pStorage:0,p2pLoading:0,p2pLabel:0,p2pAirbag:0,handlingFee:0,shippingFee:0,documentFee:0,overtime:0});
 
 // Returns true if the customer has an Active, non-expired quote sheet valid today
 function hasValidRateSheet(customer){
@@ -947,7 +947,7 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
   const[selPrint,setSelPrint]=useState({}); // orderId -> true, for picking tickets
   // Freight cost may be entered by anyone with Full Access to Outbound (admin included).
   const isFreight=mayFull;
-  const empty={type:"OUT",submitted:today.toISOString().split("T")[0],eta:"",etd:"",customerId:"",project:"",warehouseCode:"",containerNo:"",cntrSize:"",loadingType:"",sku:"",description:"",plts:"",units:"",reference:"",ttsPo:"",t2so:"",notes:"",status:"Submitted",shipMode:"FTL",carrierId:"",mktShipFee:"",serviceLines:[],docCount:0,confirmedDate:"",receivedDate:"",shippedDate:"",ledgerId:"",
+  const empty={type:"OUT",submitted:today.toISOString().split("T")[0],eta:"",etd:"",customerId:"",project:"",warehouseCode:"",containerNo:"",cntrSize:"",loadingType:"",sku:"",description:"",plts:"",units:"",weight:"",reference:"",ttsPo:"",t2so:"",notes:"",status:"Submitted",shipMode:"FTL",carrierId:"",mktShipFee:"",serviceLines:[],docCount:0,confirmedDate:"",receivedDate:"",shippedDate:"",ledgerId:"",
     freightTerms:"Prepaid",tpName:"Trucking 2000",tpAddress:"402 Deerwood Glen Drive",tpCityStateZip:"Deer Park, TX 77536",
     shipToName:"",shipToAddress:"",shipToCityStateZip:"",attachments:[],customBOL:null};
   const[form,setForm]=useState(empty);
@@ -978,6 +978,7 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
     if(!hasValidRateSheet(rc)){alert("Cannot create order: "+(rc?.name||"this customer")+" has no active/valid rate sheet. Add or renew a quote sheet in Customers → Rate Card first.");return;}
     if(!form.etd){alert("ETD (estimated ship date) is required before you can process this order.");return;}
     if(!(form.t2so&&String(form.t2so).trim())){alert("T2 SO# is required.");return;}
+    if(!(Number(form.weight)>0)){alert("Weight (LB) is required.");return;}
     // Reference # is required; if left blank it auto-fills with the T2 SO#.
     const effRef=(form.reference&&String(form.reference).trim())?form.reference:form.t2so;
     const cleanLines=(form.serviceLines||[]).filter(l=>l.desc&&(Number(l.qty)||0)>0).map(l=>({desc:l.desc,qty:Number(l.qty||0),unitPrice:Number(l.unitPrice||0)}));
@@ -998,7 +999,7 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
       const newOrders=chosen.map((l,i)=>({
         type:"OUT",submitted:form.submitted,eta:"",etd:form.etd,customerId:l.customerId,project:l.project||form.project||"",warehouseCode:l.warehouseCode,
         containerNo:l.containerNo,cntrSize:"",loadingType:l.loadingType||"",sku:l.sku,description:l.description,
-        plts:Number(pick[l.id].plts||0),units:Number(pick[l.id].units||0),reference:effRef,ttsPo:l.ttsPo||"",t2so:form.t2so,notes:form.notes,
+        plts:Number(pick[l.id].plts||0),units:Number(pick[l.id].units||0),weight:Number(form.weight||0),reference:effRef,ttsPo:l.ttsPo||"",t2so:form.t2so,notes:form.notes,
         status:"Submitted",shipMode:form.shipMode,carrierId:form.carrierId,mktShipFee:"",serviceLines:i===0?cleanLines:[],
         freightTerms:form.freightTerms,tpName:form.tpName,tpAddress:form.tpAddress,tpCityStateZip:form.tpCityStateZip,shipToName:form.shipToName,shipToAddress:form.shipToAddress,shipToCityStateZip:form.shipToCityStateZip,attachments:[],customBOL:null,
         docCount:0,confirmedDate:"",receivedDate:"",shippedDate:"",ledgerId:l.id,batchId:batch,id:"O"+uid()
@@ -1102,6 +1103,9 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
       const q=Number(shipExtras[it.key]||0);
       if(q>0)extraLines.push({desc:it.label,qty:q,unitPrice:Number(rates[it.key]||0)});
     });
+    // Overtime — hours × hourly rate, available for any loading type
+    const otHrs=Number(shipExtras.overtime||0), otRate=Number(rates.overtime||0);
+    if(otHrs>0)extraLines.push({desc:`Overtime (${otHrs} hr @ ${money(otRate)}/hr)`,qty:otHrs,unitPrice:otRate});
     const mergedLines=[...(o.serviceLines||[]),...extraLines];
     setOrders(p=>p.map(x=>x.id===o.id?{...x,status:"Shipped",shippedDate:sd,ledgerId:l.id,serviceLines:mergedLines}:x));
     setLedger(p=>p.map(x=>x.id===l.id?{...x,movements:[...(x.movements||[]),{date:sd,outPlts:pp,outUnits:uu,ref:o.reference||o.containerNo,orderId:o.id}]}:x));
@@ -1267,7 +1271,7 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
           <tr>
             <td style="${cell};text-align:center">${o.t2so||o.ttsPo||bolNo}</td>
             <td style="${cell};text-align:center">${o.plts||0}</td>
-            <td style="${cell};text-align:center"></td>
+            <td style="${cell};text-align:center">${o.weight?num(o.weight)+" LB":""}</td>
             <td style="${cell};text-align:center">Y</td>
             <td style="${cell}">${o.project||""}</td>
           </tr>
@@ -1275,7 +1279,7 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
           <tr>
             <td style="${cell};text-align:right;font-weight:bold">GRAND TOTAL</td>
             <td style="${cell};text-align:center;font-weight:bold">${o.plts||0}</td>
-            <td style="${cell}"></td><td style="${cell}"></td><td style="${cell}"></td>
+            <td style="${cell};text-align:center;font-weight:bold">${o.weight?num(o.weight)+" LB":""}</td><td style="${cell}"></td><td style="${cell}"></td>
           </tr>
         </table>
 
@@ -1298,7 +1302,7 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
             <td style="${cell};text-align:center">PLT</td>
             <td style="${cell};text-align:center">${num(o.units)}</td>
             <td style="${cell};text-align:center">CTN</td>
-            <td style="${cell};text-align:center"></td>
+            <td style="${cell};text-align:center">${o.weight?num(o.weight)+" LB":""}</td>
             <td style="${cell}"><b>${o.sku||""}</b>${o.description?("<br>"+o.description):""}</td>
           </tr>
           ${items.map(l=>`<tr><td style="${cell};text-align:center">${l.qty}</td><td style="${cell};text-align:center">EA</td><td style="${cell}"></td><td style="${cell}"></td><td style="${cell}"></td><td style="${cell}">${l.desc}</td></tr>`).join("")}
@@ -1445,7 +1449,9 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
                       {o.status==="Scheduled"&&isFreight&&<Btn sm v="ghost" onClick={()=>openFreightConfirm(o)} style={{color:C.blue,borderColor:C.blue+"55"}}>Edit Freight</Btn>}
                       {mayEdit&&!orderInvoiced(o)&&<Btn sm v="ghost" onClick={()=>{setForm({...o,origPlts:o.plts,origUnits:o.units});setModal("edit");}} style={{color:C.amber,borderColor:C.amber+"55"}}>Edit</Btn>}
                       {mayAdd&&<Btn sm v="ghost" onClick={()=>duplicateOrder(o)} style={{color:C.blue,borderColor:C.blue+"55"}}>Duplicate</Btn>}
-                      <Btn sm v="ghost" onClick={()=>printBOL(o)} style={{color:C.purple,borderColor:C.purple+"55"}}>BOL</Btn>
+                      {o.customBOL
+                        ?<Btn sm v="ghost" disabled title="A custom BOL is attached — open it from Files" style={{color:C.muted,borderColor:C.border,opacity:0.5,cursor:"not-allowed"}}>BOL 🔒</Btn>
+                        :<Btn sm v="ghost" onClick={()=>printBOL(o)} style={{color:C.purple,borderColor:C.purple+"55"}}>BOL</Btn>}
                       {mayAdd&&<Btn sm v="ghost" onClick={()=>setFileModal(o.id)} style={{color:C.blue,borderColor:C.blue+"55"}}>Files{((o.attachments&&o.attachments.length)||o.customBOL)?" ●":""}</Btn>}
                       {mayFull&&o.status==="Shipped"&&!orderInvoiced(o)&&<Btn sm v="ghost" onClick={()=>unshipOrder(o)} style={{color:C.orange,borderColor:C.orange+"55"}}>Undo Ship</Btn>}
                       {mayFull&&o.status!=="Shipped"&&!orderInvoiced(o)&&<Btn sm v="danger" onClick={()=>voidOrder(o)}>Void</Btn>}
@@ -1545,6 +1551,7 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
             <TI label="ETD *" type="date" value={form.etd} onChange={e=>setForm(f=>({...f,etd:e.target.value}))}/>
             <TI label={fcLock?"Pallets * (full container)":"Pallets *"} type="number" value={form.plts} readOnly={fcLock} onChange={e=>fcLock?null:setForm(f=>({...f,plts:e.target.value}))} style={fcLock?{opacity:0.6,cursor:"not-allowed"}:{}}/>
             <TI label={fcLock?"Units * (full container)":"Units *"} type="number" value={form.units} readOnly={fcLock} onChange={e=>fcLock?null:setForm(f=>({...f,units:e.target.value}))} style={fcLock?{opacity:0.6,cursor:"not-allowed"}:{}}/>
+            <TI label="Weight (LB) *" type="number" value={form.weight} onChange={e=>setForm(f=>({...f,weight:e.target.value}))}/>
             <TS label="Shipping Mode" value={form.shipMode} onChange={e=>setForm(f=>({...f,shipMode:e.target.value}))}>{SHIP_MODES.map(m=><option key={m}>{m}</option>)}</TS>
             <TS label="Carrier" value={form.carrierId} onChange={e=>setForm(f=>({...f,carrierId:e.target.value}))}><option value="">-</option>{carriers.filter(c=>c.active!==false).map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</TS>
             <TI label="T2 SO# *" value={form.t2so} onChange={e=>setForm(f=>({...f,t2so:e.target.value}))}/>
@@ -1584,6 +1591,7 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
             <TI label="ETD *" type="date" value={form.etd} onChange={e=>setForm(f=>({...f,etd:e.target.value}))}/>
             <TS label="Shipping Mode" value={form.shipMode} onChange={e=>setForm(f=>({...f,shipMode:e.target.value}))}>{SHIP_MODES.map(m=><option key={m}>{m}</option>)}</TS>
             <TS label="Carrier" value={form.carrierId} onChange={e=>setForm(f=>({...f,carrierId:e.target.value}))}><option value="">-</option>{carriers.filter(c=>c.active!==false).map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</TS>
+            <TI label="Weight (LB) * (shared)" type="number" value={form.weight} onChange={e=>setForm(f=>({...f,weight:e.target.value}))}/>
             <TI label="T2 SO# * (shared)" value={form.t2so} onChange={e=>setForm(f=>({...f,t2so:e.target.value}))}/>
             <TI label="Reference # (shared, blank = T2 SO#)" value={form.reference} onChange={e=>setForm(f=>({...f,reference:e.target.value}))}/>
             <TI label="Notes" value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))}/>
@@ -1642,19 +1650,20 @@ function Outbound({orders,setOrders,customers,warehouses,carriers,ledger,setLedg
             const lt=(le&&le.loadingType)||shipModal.loadingType;
             const items=extraItemsFor(lt);
             const rates=ratesForCust(shipModal.customerId,le&&le.ibDate)||{};
-            if(items.length===0)return <div style={{fontSize:12,color:C.muted,marginBottom:16}}>No extra billable items for this loading type ({lt||"-"}).</div>;
-            const extTotal=items.reduce((a,it)=>a+Number(shipExtras[it.key]||0)*Number(rates[it.key]||0),0);
+            // Overtime (hours × hourly rate) is available for every loading type.
+            const rows=[...items.map(it=>({...it,unit:""})),{key:"overtime",label:"Overtime",unit:"hr",hourly:true}];
+            const extTotal=rows.reduce((a,it)=>a+Number(shipExtras[it.key]||0)*Number(rates[it.key]||0),0);
             return(
               <div style={{marginBottom:16}}>
-                <div style={s.sec}>Extra Items (billed) — {lt&&lt.toUpperCase().startsWith("P2P")?"P2P":lt&&lt.toUpperCase().startsWith("F2P")?"F2P":""}</div>
+                <div style={s.sec}>Extra Items (billed) — {lt&&lt.toUpperCase().startsWith("P2P")?"P2P":lt&&lt.toUpperCase().startsWith("F2P")?"F2P":lt&&lt.toUpperCase().startsWith("F2F")?"F2F":""}</div>
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
-                  <thead><tr style={{background:C.bg}}>{["Item","Rate","Qty","Amount"].map(h=><th key={h} style={{...s.th,padding:"6px 8px"}}>{h}</th>)}</tr></thead>
+                  <thead><tr style={{background:C.bg}}>{["Item","Rate",rows.some(r=>r.hourly)?"Qty / Hrs":"Qty","Amount"].map(h=><th key={h} style={{...s.th,padding:"6px 8px"}}>{h}</th>)}</tr></thead>
                   <tbody>
-                    {items.map(it=>{const r=Number(rates[it.key]||0);const q=Number(shipExtras[it.key]||0);return(
+                    {rows.map(it=>{const r=Number(rates[it.key]||0);const q=Number(shipExtras[it.key]||0);return(
                       <tr key={it.key}>
-                        <td style={{...s.td,padding:"5px 8px"}}>{it.label}</td>
-                        <td style={{...s.td,padding:"5px 8px",color:C.muted}}>{money(r)}</td>
-                        <td style={{...s.td,padding:"5px 8px"}}><input type="number" min="0" value={shipExtras[it.key]||""} onChange={e=>setShipExtras(p=>({...p,[it.key]:e.target.value}))} style={{...s.input,width:70,padding:"4px 6px"}}/></td>
+                        <td style={{...s.td,padding:"5px 8px"}}>{it.label}{it.hourly?<span style={{color:C.muted}}> (per hour)</span>:""}</td>
+                        <td style={{...s.td,padding:"5px 8px",color:C.muted}}>{money(r)}{it.hourly?"/hr":""}</td>
+                        <td style={{...s.td,padding:"5px 8px"}}><input type="number" min="0" value={shipExtras[it.key]||""} onChange={e=>setShipExtras(p=>({...p,[it.key]:e.target.value}))} style={{...s.input,width:80,padding:"4px 6px"}} placeholder={it.hourly?"hrs":""}/></td>
                         <td style={{...s.td,padding:"5px 8px",fontWeight:700,color:C.green}}>{money(q*r)}</td>
                       </tr>
                     );})}
@@ -2244,7 +2253,7 @@ function RateCardModal({customer,setCustomers,onClose,isAdmin,mayFull=false}){
       {sec:"F2F Charges",color:C.blue,fields:[["f2fUnload","Unloading"],["f2fSort","Sorting"],["f2fHandling","Handling"],["f2fReload","Reloading"]]},
       {sec:"F2P Charges",color:C.purple,fields:[["f2pUnload","Unloading"],["f2pPalletize","Palletizing"],["f2pPallet","Pallet Fee"],["f2pWrap","Wrapping"],["f2pLabel","Labeling (extra)"],["f2pAirbag","Airbag (extra)"]]},
       {sec:"P2P Charges",color:C.teal,fields:[["p2pForklift","Forklift"],["p2pStorage","Storage"],["p2pLoading","Loading"],["p2pLabel","Labeling (extra)"],["p2pAirbag","Airbag (extra)"]]},
-      {sec:"Other",color:C.orange,fields:[["handlingFee","Handling Fee"],["shippingFee","Shipping Fee"],["documentFee","Document Fee"]]},
+      {sec:"Other",color:C.orange,fields:[["handlingFee","Handling Fee"],["shippingFee","Shipping Fee"],["documentFee","Document Fee"],["overtime","Overtime ($/hr)"]]},
     ];
     return(
       <Modal title={`Quote Sheet — ${customer.name}`} onClose={()=>setEditing(null)} wide>
